@@ -1,0 +1,248 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ============================================================
+   LeadSpark CRM design tokens — single source of truth: style.md
+   ============================================================ */
+:root {
+  /* brand — soft blue, gently muted, with gold as the accent */
+  --primary: #4270bf;
+  --primary-deep: #35609f;
+  --primary-strong: #2f5590;
+  --primary-soft: #e9f0fb;
+  /* large brand fills (rail / hero / dock). Darkened in .dark only — light stays as-is. */
+  --grad-brand-from: #567fce;
+  --grad-brand-to: #33528f;
+  --secondary: #cba14a;
+  --secondary-soft: #f7efda;
+
+  /* semantic: base (fills/charts) + strong (AA text) + soft (tints) */
+  --success: #3fd16f;
+  --success-strong: #15803d;
+  --success-soft: #e4f8ec;
+  --warning: #f5a623;
+  --warning-strong: #b45309;
+  --warning-soft: #fef3e2;
+  --attention: #ff5c6c;
+  --attention-strong: #be123c;
+  --attention-soft: #ffe9ec;
+  --sky: #4da6ff;
+
+  /* jeweller accents — the website's navy #1c3f7c + gold #c9a227, softened so they
+     sit under the violet brand rather than competing with it. */
+  --gold: #b8912f;
+  --gold-strong: #8f6d1c;
+  --gold-soft: #f6efda;
+  --blue: #4f7fd6;
+  --blue-strong: #3563bf;
+  --blue-soft: #e8effb;
+
+  /* neutrals */
+  --background: #f6f7fb;
+  --card: #ffffff;
+  --foreground: #23262f;
+  --foreground-body: #3e4250;
+  --muted-foreground: #6b7280;
+  --border: #e9ebf2;
+
+  /* login artwork scope only */
+  --art-navy: #0c0e1a;
+  --art-navy-2: #1b2140;
+  --art-copper: #ff8a5c;
+
+  /* charts (roles per planning/14) */
+  --chart-1: #3fd16f;
+  --chart-2: #ff5c6c;
+  --chart-3: #f5a623;
+  --chart-4: #4270bf;
+  --chart-5: #cba14a;
+
+  /* radius system */
+  --radius-pill: 999px;
+  --radius-input: 18px;
+  --radius-card: 24px;
+  --radius-hero: 28px;
+  --radius-rail: 32px;
+
+  /* elevation */
+  --shadow-1: 0 2px 12px rgba(35, 38, 47, 0.05);
+  --shadow-2: 0 8px 24px rgba(35, 38, 47, 0.08);
+  --shadow-3: 0 16px 48px rgba(35, 38, 47, 0.12);
+  --shadow-hero: 0 12px 32px rgba(66, 112, 191, 0.22);
+}
+
+.dark {
+  --primary: #6f9bea;
+  --primary-deep: #4270bf;
+  --primary-strong: #9bbcf8;
+  --primary-soft: rgba(111, 155, 234, 0.14);
+  /* soft blue rail, a touch deeper so it doesn't glare on the dark canvas */
+  --grad-brand-from: #3f63a8;
+  --grad-brand-to: #2f4f86;
+  --secondary: #e0c079;
+  --secondary-soft: rgba(224, 192, 121, 0.14);
+
+  --success: #3fd16f;
+  --success-strong: #4ade80;
+  --success-soft: rgba(63, 209, 111, 0.12);
+  --warning: #f5a623;
+  --warning-strong: #fbbf24;
+  --warning-soft: rgba(245, 166, 35, 0.12);
+  --attention: #ff5c6c;
+  --attention-strong: #fb7185;
+  --attention-soft: rgba(255, 92, 108, 0.12);
+  /* jeweller accents — brighter on the dark canvas, still soft */
+  --gold: #e0c079;
+  --gold-strong: #ecce8f;
+  --gold-soft: rgba(224, 192, 121, 0.14);
+  --blue: #7ea6f5;
+  --blue-strong: #9bbcf8;
+  --blue-soft: rgba(126, 166, 245, 0.14);
+
+  --background: #101118;
+  --card: #181a23;
+  --foreground: #f2f3f7;
+  --foreground-body: #d6d9e0;
+  --muted-foreground: #9aa0af;
+  --border: #262938;
+
+  --shadow-1: none;
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-3: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --shadow-hero: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+@theme inline {
+  --color-primary: var(--primary);
+  --color-primary-deep: var(--primary-deep);
+  --color-primary-strong: var(--primary-strong);
+  --color-primary-soft: var(--primary-soft);
+  --color-secondary: var(--secondary);
+  --color-secondary-soft: var(--secondary-soft);
+  --color-success: var(--success);
+  --color-success-strong: var(--success-strong);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-strong: var(--warning-strong);
+  --color-warning-soft: var(--warning-soft);
+  --color-attention: var(--attention);
+  --color-attention-strong: var(--attention-strong);
+  --color-attention-soft: var(--attention-soft);
+  --color-sky: var(--sky);
+  --color-gold: var(--gold);
+  --color-gold-strong: var(--gold-strong);
+  --color-gold-soft: var(--gold-soft);
+  --color-blue: var(--blue);
+  --color-blue-strong: var(--blue-strong);
+  --color-blue-soft: var(--blue-soft);
+  --color-background: var(--background);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-body: var(--foreground-body);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-art-navy: var(--art-navy);
+  --color-art-navy-2: var(--art-navy-2);
+  --color-art-copper: var(--art-copper);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --radius-pill: var(--radius-pill);
+  --radius-input: var(--radius-input);
+  --radius-card: var(--radius-card);
+  --radius-hero: var(--radius-hero);
+  --radius-rail: var(--radius-rail);
+
+  --shadow-card: var(--shadow-1);
+  --shadow-raised: var(--shadow-2);
+  --shadow-modal: var(--shadow-3);
+  --shadow-hero: var(--shadow-hero);
+
+  --font-sans: var(--font-dm-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+}
+
+/* Element defaults live in @layer base so Tailwind utilities (e.g. text-white on a heading
+   over a coloured hero) always win — otherwise the unlayered h1..h6 rule beat the utility. */
+@layer base {
+  body {
+    background: var(--background);
+    color: var(--foreground-body);
+    font-family: var(--font-dm-sans), ui-sans-serif, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    color: var(--foreground);
+  }
+}
+
+/* Keyboard focus ring for interactive elements (style.md §16). Text boxes & dropdowns opt out —
+   they show a single clean border-colour change on focus, so no doubled/offset ring on click. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: none;
+  }
+}
+
+/* numbers in tables/KPIs align */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: var(--primary-soft);
+  color: var(--primary-strong);
+}
+
+/* hide scrollbars where the design calls for clean rails/panels */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Print: when an invoice document is on the page (Ctrl+P or the Print button),
+   drop the browser's URL/date/page headers and print ONLY the invoice — no app chrome. */
+@media print {
+  /* margin:0 makes Chromium omit the auto header (title/date) + footer (URL/page) */
+  @page {
+    size: A4;
+    margin: 0;
+  }
+  body {
+    background: #fff;
+  }
+  /* only the invoice document prints */
+  body:has(.print-invoice) * {
+    visibility: hidden;
+  }
+  body:has(.print-invoice) .print-invoice,
+  body:has(.print-invoice) .print-invoice * {
+    visibility: visible;
+  }
+  .print-invoice {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 14mm;
+    border-radius: 0;
+    box-shadow: none;
+  }
+}

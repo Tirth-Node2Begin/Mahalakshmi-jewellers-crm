@@ -1,0 +1,415 @@
+<?php
+
+declare(strict_types=1);
+
+namespace CRM\Reports;
+
+use CRM\Auth\AuthUser;
+use CRM\Auth\PermissionService;
+use CRM\Database\Database;
+
+/**
+ * Role-routed dashboard widget payload. One round trip per role.
+ * Money truths: sales = finalised invoices, cash in = invoice_payments (bounced/cancelled
+ * excluded), spend = expenses. Read-only GROUP BY aggregation — no cron pre-aggregation.
+ *
+ * Three hand-designed variants map to Mahalakshmi Jewellers' fixed roles (database/seed.php §2):
+ *   - executive  → super_admin, admin (comprehensive, permission-gated so it never leaks)
+ *   - sales      → billing_officer (billing & collections)
+ *   - inventory  → inventory (stock value, low stock, movements)
+ * RBAC: every variant queries ONLY data its role is granted; executive gates each section
+ * with PermissionService::can() so any lesser/custom role that resolves here self-trims.
+ *
+ * Invoice vocabulary (jewellery ERP): status is draft | final | cancelled.
+ * A bill counts as revenue only when status='final'; "outstanding" is a final bill whose
+ * paid_amount is still short of grand_total.
+ */
+final class DashboardRepository
+{
+    /** Payments that really represent cash in (bounced cheques / cancelled receipts don't). */
+    private const CLEARED = "(payment_mode <> 'cheque' OR cheque_status <> 'bounced' OR cheque_status IS NULL) AND status <> 'cancelled'";
+    /** Same predicate, for queries that alias invoice_payments as p. */
+    private const CLEARED_P = "(p.payment_mode <> 'cheque' OR p.cheque_status <> 'bounced' OR p.cheque_status IS NULL) AND p.status <> 'cancelled'";
+    /** A finalised bill that is not fully settled. */
+    private const UNSETTLED = "status = 'final' AND paid_amount < grand_total";
+
+    // ===================================================================== dispatch
+
+    /** Resolve the caller's variant and return its payload. */
+    public static function payload(AuthUser $user, int $months): array
+    {
+        return match (self::resolveVariant($user)) {
+            'inventory' => self::inventoryPayload($months),
+            'sales'     => self::salesPayload($months, $user),
+            default     => self::executivePayload($months, $user),
+        };
+    }
+
+    /** Highest-priority role → dashboard variant. Fixed 4-role model (seed §2). */
+    public static function resolveVariant(AuthUser $user): string
+    {
+        if ($user->isSuperAdmin() || $user->hasRole('admin')) {
+            return 'executive';
+        }
+        if ($user->hasRole('inventory')) {
+            return 'inventory';
+        }
+        if ($user->hasRole('billing_officer')) {
+            return 'sales';
+        }
+        // Unknown/custom role: fall back to the comprehensive executive view, whose sections
+        // are each permission-gated so a lower-privileged role only sees permitted resources.
+        return 'executive';
+    }
+
+    // ==================================================================== executive
+
+    /** super_admin / admin — the full business picture, each block gated by permission. */
+    public static function executivePayload(int $months, AuthUser $user): array
+    {
+        $can   = static fn (string $p): bool => PermissionService::can($user, $p);
+        $inv   = $can('invoices.read');
+        $exp   = $can('expenses.read');
+        $stock = $can('inventory.read');
+        $cust  = $can('customers.read');
+
+        return [
+            'variant' => 'executive',
+            'alerts' => [
+                'overdue_invoices' => $inv ? self::countOverdueInvoices() : 0,
+                'low_stock'        => $stock ? self::countLowStock() : 0,
+            ],
+            'kpis'               => self::executiveKpis($inv, $exp),
+            'cashflow'           => self::cashflow($months, $inv, $exp),
+            'upcoming_occasions' => $cust ? self::upcomingOccasions() : [],
+            'recent_payments'    => $inv ? self::recentPayments() : [],
+            'recent_expenses'    => $exp ? self::recentExpenses() : [],
+            'low_stock'          => $stock ? self::lowStock() : [],
+        ];
+    }
+
+    private static function executiveKpis(bool $inv, bool $exp): array
+    {
+        $monthStart = date('Y-m-01');
+        $monthEnd   = date('Y-m-t');
+        $revenue = $inv ? (float) Database::fetchValue(
+            'SELECT COALESCE(SUM(amount),0) FROM invoice_payments WHERE payment_date BETWEEN :s AND :e AND ' . self::CLEARED,
+            ['s' => $monthStart, 'e' => $monthEnd]
+        ) : 0.0;
+        $expenses = $exp ? (float) Database::fetchValue(
+            'SELECT COALESCE(SUM(amount),0) FROM expenses WHERE expense_date BETWEEN :s AND :e',
+            ['s' => $monthStart, 'e' => $monthEnd]
+        ) : 0.0;
+
+        return [
+            'month_revenue'      => round($revenue, 2),
+            'month_expenses'     => round($expenses, 2),
+            'month_net'          => round($revenue - $expenses, 2),
+            'month_sales'        => $inv ? self::salesBetween($monthStart, $monthEnd) : 0.0,
+            'today_sales'        => $inv ? self::todaysSales() : 0.0,
+            'today_collections'  => $inv ? self::todaysCollections() : 0.0,
+            'outstanding'        => $inv ? self::outstanding() : 0.0,
+        ];
+    }
+
+    // ======================================================================== sales
+
+    /** billing_officer — billing & collections. */
+    public static function salesPayload(int $months, AuthUser $user): array
+    {
+        return [
+            'variant' => 'sales',
+            'alerts' => [
+                'overdue_invoices' => self::countOverdueInvoices(),
+                'low_stock'        => self::countLowStock(),
+            ],
+            'kpis'               => self::salesKpis(),
+            'collections'        => self::collectionsSeries($months),
+            'upcoming_occasions' => self::upcomingOccasions(),
+            'recent_payments'    => self::recentPayments(),
+        ];
+    }
+
+    private static function salesKpis(): array
+    {
+        $monthStart = date('Y-m-01');
+        $monthEnd   = date('Y-m-t');
+        $collections = (float) Database::fetchValue(
+            'SELECT COALESCE(SUM(amount),0) FROM invoice_payments WHERE payment_date BETWEEN :s AND :e AND ' . self::CLEARED,
+            ['s' => $monthStart, 'e' => $monthEnd]
+        );
+        return [
+            'month_collections' => round($collections, 2),
+            'month_sales'       => self::salesBetween($monthStart, $monthEnd),
+            'today_sales'       => self::todaysSales(),
+            'today_collections' => self::todaysCollections(),
+            'outstanding'       => self::outstanding(),
+            'draft_invoices'    => (int) Database::fetchValue("SELECT COUNT(*) FROM invoices WHERE status = 'draft'"),
+        ];
+    }
+
+    /** 12-month collected (payments in) series — no expense visibility for this role. */
+    private static function collectionsSeries(int $months): array
+    {
+        $months = max(1, min(24, $months));
+        $income = self::monthlySeries(
+            "SELECT DATE_FORMAT(payment_date,'%Y-%m') m, SUM(amount) v FROM invoice_payments WHERE payment_date >= :start AND " . self::CLEARED . ' GROUP BY m',
+            $months
+        );
+        $out = [];
+        foreach (self::monthKeys($months) as $key) {
+            $out[] = ['month' => $key, 'collected' => round((float) ($income[$key] ?? 0), 2)];
+        }
+        return $out;
+    }
+
+    // ==================================================================== inventory
+
+    /** inventory — capital tied in metal, low stock, movements. */
+    public static function inventoryPayload(int $months): array
+    {
+        return [
+            'variant' => 'inventory',
+            'alerts' => [
+                'low_stock'  => self::countLowStock(),
+                'dead_stock' => self::countDeadStock(),
+            ],
+            'kpis'              => self::inventoryKpis(),
+            'stock_by_category' => self::stockByCategory(),
+            'stock_by_metal'    => self::stockByMetal(),
+            'low_stock'         => self::lowStock(),
+            'recent_movements'  => self::recentMovements(),
+        ];
+    }
+
+    private static function inventoryKpis(): array
+    {
+        $byType = [];
+        foreach (Database::fetchAll(
+            'SELECT item_type, COALESCE(SUM(current_stock * avg_cost),0) v FROM inventory_items WHERE is_active = 1 GROUP BY item_type'
+        ) as $r) {
+            $byType[(string) $r['item_type']] = (float) $r['v'];
+        }
+        $raw = $byType['raw_material'] ?? 0.0;
+        $fin = $byType['stock'] ?? 0.0;
+        $old = $byType['old_metal'] ?? 0.0;
+
+        $monthStart = date('Y-m-01');
+        // Half-open upper bound so timestamps on the last day are included.
+        $nextMonthStart = date('Y-m-01', strtotime('first day of next month'));
+        return [
+            'stock_value'      => round($raw + $fin + $old, 2),
+            'raw_value'        => round($raw, 2),
+            'finished_value'   => round($fin, 2),
+            'old_metal_value'  => round($old, 2),
+            'net_weight'       => round((float) Database::fetchValue(
+                "SELECT COALESCE(SUM(net_weight * current_stock),0) FROM inventory_items WHERE is_active = 1 AND status = 'in_stock'"
+            ), 3),
+            'low_stock_count'  => self::countLowStock(),
+            'dead_stock_count' => self::countDeadStock(),
+            // Value of stock RECEIVED this month, from the inventory ledger the role owns
+            // (inventory.read) — NOT the purchases finance table (no purchase grant exists).
+            'stock_added_value' => round((float) Database::fetchValue(
+                "SELECT COALESCE(SUM(CASE WHEN value > 0 THEN value ELSE qty * unit_cost END),0) FROM inventory_transactions
+                 WHERE type = 'in' AND created_at >= :s AND created_at < :e",
+                ['s' => $monthStart, 'e' => $nextMonthStart]
+            ), 2),
+        ];
+    }
+
+    /** Stock value tied up per category (metal is capital) — top 8. */
+    private static function stockByCategory(): array
+    {
+        return Database::fetchAll(
+            "SELECT COALESCE(c.name,'Uncategorised') AS category,
+                    ROUND(SUM(i.current_stock * i.avg_cost), 2) AS value
+             FROM inventory_items i LEFT JOIN inventory_categories c ON c.id = i.category_id
+             WHERE i.is_active = 1
+             GROUP BY c.id
+             HAVING value > 0
+             ORDER BY value DESC LIMIT 8"
+        );
+    }
+
+    /** Weight + value held per metal/purity — the jewellery view of stock. */
+    private static function stockByMetal(): array
+    {
+        return Database::fetchAll(
+            "SELECT COALESCE(i.metal,'other') AS metal,
+                    COALESCE(pu.code,'—') AS purity,
+                    ROUND(COALESCE(SUM(i.net_weight * i.current_stock),0), 3) AS net_weight,
+                    ROUND(COALESCE(SUM(i.current_stock * i.avg_cost),0), 2) AS value
+             FROM inventory_items i LEFT JOIN purities pu ON pu.id = i.purity_id
+             WHERE i.is_active = 1 AND i.status = 'in_stock'
+             GROUP BY i.metal, pu.id
+             ORDER BY value DESC LIMIT 8"
+        );
+    }
+
+    private static function recentMovements(): array
+    {
+        return Database::fetchAll(
+            "SELECT t.id, t.type, t.reason, t.qty, t.weight, t.unit_cost, t.value, t.created_at,
+                    i.name AS item_name, i.item_code
+             FROM inventory_transactions t JOIN inventory_items i ON i.id = t.item_id
+             ORDER BY t.id DESC LIMIT 8"
+        );
+    }
+
+    // =================================================================== shared bits
+
+    /** 12-month income (payments) vs expense series. Either side can be suppressed by RBAC. */
+    public static function cashflow(int $months, bool $income = true, bool $expense = true): array
+    {
+        $months = max(1, min(24, $months));
+        $inc = $income ? self::monthlySeries("SELECT DATE_FORMAT(payment_date,'%Y-%m') m, SUM(amount) v FROM invoice_payments WHERE payment_date >= :start AND " . self::CLEARED . ' GROUP BY m', $months) : [];
+        $exp = $expense ? self::monthlySeries("SELECT DATE_FORMAT(expense_date,'%Y-%m') m, SUM(amount) v FROM expenses WHERE expense_date >= :start GROUP BY m", $months) : [];
+        $out = [];
+        foreach (self::monthKeys($months) as $key) {
+            $out[] = ['month' => $key, 'income' => round((float) ($inc[$key] ?? 0), 2), 'expense' => round((float) ($exp[$key] ?? 0), 2)];
+        }
+        return $out;
+    }
+
+    /**
+     * Customers + family members with a birthday or anniversary in the next 7 days.
+     * The window is computed on each date's NEXT occurrence, so it stays correct across
+     * the year-end boundary (e.g. today 28 Dec → 3 Jan) where a raw MM-DD BETWEEN fails.
+     */
+    private static function upcomingOccasions(): array
+    {
+        // Next occurrence of a stored date's MM-DD, rolled to next year if already passed.
+        $next = static fn (string $col): string =>
+            "STR_TO_DATE(CONCAT(YEAR(CURDATE()) + (DATE_FORMAT($col,'%m-%d') < DATE_FORMAT(CURDATE(),'%m-%d')), DATE_FORMAT($col,'-%m-%d')),'%Y-%m-%d')";
+        $inWindow = static fn (string $col): string =>
+            "{$next($col)} BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)";
+
+        return Database::fetchAll(
+            "SELECT name, occasion, on_date FROM (
+                SELECT name, 'Birthday' AS occasion, dob AS on_date, {$next('dob')} AS next_date
+                FROM customers WHERE is_active = 1 AND dob IS NOT NULL AND {$inWindow('dob')}
+                UNION ALL
+                SELECT name, 'Anniversary' AS occasion, anniversary AS on_date, {$next('anniversary')} AS next_date
+                FROM customers WHERE is_active = 1 AND anniversary IS NOT NULL AND {$inWindow('anniversary')}
+                UNION ALL
+                SELECT CONCAT(name, ' (family)') AS name, 'Birthday' AS occasion, dob AS on_date, {$next('dob')} AS next_date
+                FROM family_members WHERE dob IS NOT NULL AND {$inWindow('dob')}
+                UNION ALL
+                SELECT CONCAT(name, ' (family)') AS name, 'Anniversary' AS occasion, anniversary AS on_date, {$next('anniversary')} AS next_date
+                FROM family_members WHERE anniversary IS NOT NULL AND {$inWindow('anniversary')}
+             ) o ORDER BY next_date LIMIT 10"
+        );
+    }
+
+    /** Walk-in bills have no customer row, so both joins are LEFT and the name falls back. */
+    private static function recentPayments(): array
+    {
+        return Database::fetchAll(
+            "SELECT p.id, p.amount, p.payment_date, p.payment_mode, i.invoice_no,
+                    COALESCE(c.name, ic.name, i.walkin_name, 'Walk-in') AS customer_name
+             FROM invoice_payments p
+             LEFT JOIN invoices i ON i.id = p.invoice_id
+             LEFT JOIN customers c ON c.id = p.customer_id
+             LEFT JOIN customers ic ON ic.id = i.customer_id
+             WHERE " . self::CLEARED_P . ' ORDER BY p.id DESC LIMIT 6'
+        );
+    }
+
+    private static function recentExpenses(): array
+    {
+        return Database::fetchAll(
+            'SELECT e.id, e.amount, e.expense_date, e.paid_to, c.name AS category_name
+             FROM expenses e JOIN expense_categories c ON c.id = e.category_id
+             ORDER BY e.id DESC LIMIT 6'
+        );
+    }
+
+    private static function lowStock(): array
+    {
+        return Database::fetchAll(
+            "SELECT id, item_code, name, item_type, metal, current_stock, reorder_level, avg_cost,
+                    (SELECT short_name FROM units u WHERE u.id = i.unit_id) AS unit
+             FROM inventory_items i WHERE is_active = 1 AND reorder_level > 0 AND current_stock <= reorder_level ORDER BY current_stock LIMIT 8"
+        );
+    }
+
+    // -------------------------------------------------------------- money helpers
+
+    /** Billed value of finalised invoices in a window (drafts/cancelled excluded). */
+    private static function salesBetween(string $from, string $to): float
+    {
+        return round((float) Database::fetchValue(
+            "SELECT COALESCE(SUM(grand_total),0) FROM invoices WHERE status = 'final' AND invoice_date BETWEEN :s AND :e",
+            ['s' => $from, 'e' => $to]
+        ), 2);
+    }
+
+    private static function todaysSales(): float
+    {
+        return round((float) Database::fetchValue(
+            "SELECT COALESCE(SUM(grand_total),0) FROM invoices WHERE status = 'final' AND invoice_date = CURDATE()"
+        ), 2);
+    }
+
+    private static function todaysCollections(): float
+    {
+        return round((float) Database::fetchValue(
+            'SELECT COALESCE(SUM(amount),0) FROM invoice_payments WHERE payment_date = CURDATE() AND ' . self::CLEARED
+        ), 2);
+    }
+
+    private static function outstanding(): float
+    {
+        return round((float) Database::fetchValue(
+            'SELECT COALESCE(SUM(grand_total - paid_amount),0) FROM invoices WHERE ' . self::UNSETTLED
+        ), 2);
+    }
+
+    // -------------------------------------------------------------- count helpers
+
+    private static function countOverdueInvoices(): int
+    {
+        return (int) Database::fetchValue(
+            'SELECT COUNT(*) FROM invoices WHERE ' . self::UNSETTLED . ' AND due_date IS NOT NULL AND due_date < CURDATE()'
+        );
+    }
+
+    private static function countLowStock(): int
+    {
+        return (int) Database::fetchValue('SELECT COUNT(*) FROM inventory_items WHERE is_active = 1 AND reorder_level > 0 AND current_stock <= reorder_level');
+    }
+
+    /** Active items holding stock with no movement in the last 90 days (frozen capital). */
+    private static function countDeadStock(): int
+    {
+        return (int) Database::fetchValue(
+            "SELECT COUNT(*) FROM inventory_items i
+             WHERE i.is_active = 1 AND i.current_stock > 0
+               AND NOT EXISTS (SELECT 1 FROM inventory_transactions t
+                               WHERE t.item_id = i.id AND t.created_at >= DATE_SUB(CURDATE(), INTERVAL 90 DAY))"
+        );
+    }
+
+    // --------------------------------------------------------------------- helpers
+
+    /** @return array<string,float> month(YYYY-MM) → value */
+    private static function monthlySeries(string $sql, int $months): array
+    {
+        $start = date('Y-m-01', strtotime('-' . ($months - 1) . ' months'));
+        $map = [];
+        foreach (Database::fetchAll($sql, ['start' => $start]) as $r) {
+            $map[$r['m']] = (float) $r['v'];
+        }
+        return $map;
+    }
+
+    /** @return string[] last N month keys oldest→newest */
+    private static function monthKeys(int $months): array
+    {
+        $keys = [];
+        for ($i = $months - 1; $i >= 0; $i--) {
+            $keys[] = date('Y-m', strtotime("-$i months"));
+        }
+        return $keys;
+    }
+}

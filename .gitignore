@@ -1,0 +1,8 @@
+.env
+node_modules/
+frontend/out/
+frontend/.next/
+uploads/
+*.tsbuildinfo
+
+frontend/next-env.d.ts
