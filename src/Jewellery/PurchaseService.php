@@ -73,7 +73,7 @@ final class PurchaseService
                 $ratePerGram = max(0.0, (float) ($line['rate_per_gram'] ?? 0));
                 $makingCharge = max(0.0, (float) ($line['making_charge'] ?? 0));
                 $taxRate = max(0.0, (float) ($line['tax_rate'] ?? 0));
-                $metal = ($line['metal'] ?? null) === 'silver' ? 'silver' : 'gold';
+                $metal = Metals::normalise($line['metal'] ?? null);
                 $purityId = isset($line['purity_id']) && $line['purity_id'] !== null ? (int) $line['purity_id'] : null;
 
                 $amount = $kind === 'service'
@@ -162,9 +162,12 @@ final class PurchaseService
             }
             if (abs($roundOff) > 0.001) {
                 $roundLedger = Ledgers::system('round_off');
+                // mirror image of the sales side: here the ROUNDED figure is the
+                // credit (what we owe the vendor) and the unrounded components are
+                // the debits, so a positive round-off needs a DEBIT to balance.
                 $entries[] = $roundOff > 0
-                    ? ['ledger_id' => $roundLedger, 'cr' => $roundOff]
-                    : ['ledger_id' => $roundLedger, 'dr' => abs($roundOff)];
+                    ? ['ledger_id' => $roundLedger, 'dr' => $roundOff]
+                    : ['ledger_id' => $roundLedger, 'cr' => abs($roundOff)];
             }
             $entries[] = ['ledger_id' => Ledgers::vendor($supplierId), 'cr' => $grandTotal];
 

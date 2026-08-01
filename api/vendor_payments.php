@@ -55,8 +55,10 @@ if (Request::method() === 'GET') {
         ]);
     }
 
+    // purchase_id / supplier_id let the list row link straight to the bill it paid
     $sql = "SELECT vp.id, vp.payment_no, vp.payment_date, vp.payment_mode, vp.amount, vp.ref_no,
-                   vp.status, s.name AS vendor_name, p.purchase_no, b.account_name, u.full_name AS created_by_name
+                   vp.status, vp.supplier_id, vp.purchase_id,
+                   s.name AS vendor_name, p.purchase_no, b.account_name, u.full_name AS created_by_name
               FROM vendor_payments vp
               JOIN suppliers s ON s.id = vp.supplier_id
          LEFT JOIN purchases p ON p.id = vp.purchase_id

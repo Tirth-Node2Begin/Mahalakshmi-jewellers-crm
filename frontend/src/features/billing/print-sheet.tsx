@@ -27,7 +27,7 @@ export function useAutoPrint(enabled: boolean, ready: boolean) {
   }, [enabled, ready]);
 }
 
-function ShopHeader({ company, docTitle, docNo, docDate, extra }: {
+export function ShopHeader({ company, docTitle, docNo, docDate, extra }: {
   company: CompanySettings;
   docTitle: string;
   docNo: string;
@@ -62,7 +62,7 @@ function ShopHeader({ company, docTitle, docNo, docDate, extra }: {
   );
 }
 
-function PartyBlock({ label, name, phone, address, gstin }: {
+export function PartyBlock({ label, name, phone, address, gstin }: {
   label: string;
   name: string;
   phone?: string | null;
@@ -80,7 +80,7 @@ function PartyBlock({ label, name, phone, address, gstin }: {
   );
 }
 
-function SumRow({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+export function SumRow({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
   return (
     <div className={cn("flex justify-between gap-6 py-0.5", strong ? "text-foreground" : "text-muted-foreground")}>
       <span>{label}</span>
@@ -89,12 +89,12 @@ function SumRow({ label, value, strong }: { label: string; value: string; strong
   );
 }
 
-function Signatures({ shopName }: { shopName: string }) {
+export function Signatures({ shopName, leftLabel = "Customer signature" }: { shopName: string; leftLabel?: string }) {
   return (
     <div className="mt-12 flex items-end justify-between gap-6">
       <div className="text-xs text-muted-foreground">
         <div className="h-10 w-44 border-b border-border" />
-        <p className="mt-1.5">Customer signature</p>
+        <p className="mt-1.5">{leftLabel}</p>
       </div>
       <div className="w-44 text-right text-xs text-muted-foreground">
         <p className="mb-1 font-medium text-foreground">For {shopName}</p>

@@ -11,9 +11,11 @@ use CRM\Core\Response;
 use CRM\Database\Database;
 use CRM\Support\Audit;
 use CRM\Support\FiscalYear;
+use CRM\Support\GstVisibility;
 use CRM\Validation\Validator;
 
 $user = requireApiAuth();
+$gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
 
 if (Request::method() === 'GET') {
     requirePermission('accounting.read');
@@ -27,12 +29,19 @@ if (Request::method() === 'GET') {
         $fy = FiscalYear::range();
         $from = (string) ($_GET['from'] ?? $fy['start']);
         $to = (string) ($_GET['to'] ?? $fy['end']);
-        Response::success(['statement' => AccountingRepository::ledgerStatement($ledgerId, $from, $to)]);
+        Response::success([
+            'statement' => AccountingRepository::ledgerStatement(
+                $ledgerId,
+                $from,
+                $to,
+                $gstVisibleOnly
+            ),
+        ]);
     }
 
     if ($view === 'daybook') {
         $date = (string) ($_GET['date'] ?? date('Y-m-d'));
-        Response::success(['date' => $date, 'vouchers' => AccountingRepository::dayBook($date)]);
+        Response::success(['date' => $date, 'vouchers' => AccountingRepository::dayBook($date, $gstVisibleOnly)]);
     }
 
     if ($view === 'voucher') {
@@ -46,6 +55,9 @@ if (Request::method() === 'GET') {
             ['id' => $id]
         );
         if ($voucher === null) {
+            Response::error('NOT_FOUND', 'Voucher not found.', 404);
+        }
+        if ($gstVisibleOnly && AccountingRepository::voucherHiddenFromGstLedger($id)) {
             Response::error('NOT_FOUND', 'Voucher not found.', 404);
         }
         $voucher['entries'] = Database::fetchAll(

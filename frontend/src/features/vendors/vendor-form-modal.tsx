@@ -10,7 +10,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { isValidEmail } from "@/shared/utils/validation";
-import { PARTNER_CATEGORIES, VENDOR_TYPE_LABEL, vendorsApi, type Vendor } from "./api";
+import { vendorsApi, type Vendor } from "./api";
+import { VendorTypeSelect } from "./vendor-type-select";
 
 const defaultForm = {
   name: "",
@@ -156,17 +157,7 @@ export function VendorFormModal({
           </div>
           <div>
             <Label htmlFor="v_type">Type</Label>
-            <Select id="v_type" value={form.vendor_type} onChange={(e) => set("vendor_type", e.target.value)}>
-              {PARTNER_CATEGORIES.map((cat) => (
-                <optgroup key={cat.key} label={cat.label}>
-                  {cat.types.map((t) => (
-                    <option key={t} value={t}>
-                      {VENDOR_TYPE_LABEL[t]}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </Select>
+            <VendorTypeSelect id="v_type" value={form.vendor_type} onChange={(t) => set("vendor_type", t)} />
           </div>
         </div>
 

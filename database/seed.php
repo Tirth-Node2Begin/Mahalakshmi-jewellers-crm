@@ -23,33 +23,93 @@ use CRM\Support\FiscalYear;
 // ---------------------------------------------------------------------------
 // 1. Permission catalog (source of truth: plan/03-api-list.md §8)
 // ---------------------------------------------------------------------------
+// action => the plain-language label shown on the Roles page, so an owner ticking
+// boxes reads "See profit & loss" rather than "pnl".
 $catalog = [
-    'dashboard' => ['read'],
-    'reports' => ['read', 'pnl', 'accounting', 'gst', 'outstanding', 'stock'],
-    'customers' => ['read', 'create', 'update', 'delete', 'ledger'],
-    'invoices' => ['read', 'create', 'override', 'cancel'],
-    'estimates' => ['read', 'create'],
-    'payments' => ['read', 'create', 'vendor', 'cancel'],
-    'purchases' => ['read', 'create', 'cancel'],
-    'expenses' => ['read', 'create', 'update', 'delete'],
-    'bank_accounts' => ['manage'],
-    'inventory' => ['read', 'manage', 'adjust', 'issue', 'opening'],
-    'rates' => ['read', 'set'],
-    'vendors' => ['read', 'manage', 'ledger'],
-    'accounting' => ['read', 'manage', 'journal'],
-    'users' => ['read', 'manage'],
-    'rbac' => ['manage'],
-    'settings' => ['read', 'manage'],
-    'audit' => ['read'],
+    'dashboard' => ['read' => 'See the dashboard'],
+    'reports' => [
+        'read' => 'See general reports',
+        'pnl' => 'See profit & loss',
+        'accounting' => 'See trial balance, day book & ledgers',
+        'gst' => 'See the GST summary',
+        'outstanding' => 'See who owes money',
+        'stock' => 'See stock reports and item cost',
+    ],
+    'customers' => [
+        'read' => 'See customers',
+        'create' => 'Add a customer',
+        'update' => 'Edit a customer',
+        'delete' => 'Remove a customer',
+        'ledger' => "See a customer's account statement",
+    ],
+    'invoices' => [
+        'read' => 'See bills',
+        'create' => 'Make a bill',
+        'override' => 'Change rate, making or tax on a bill',
+        'cancel' => 'Cancel a bill',
+    ],
+    'estimates' => [
+        'read' => 'See estimates',
+        'create' => 'Make an estimate',
+    ],
+    'payments' => [
+        'read' => 'See payments',
+        'create' => 'Take money from a customer',
+        'vendor' => 'Pay a vendor',
+        'cancel' => 'Cancel a payment',
+    ],
+    'purchases' => [
+        'read' => 'See purchases',
+        'create' => 'Record a purchase',
+        'cancel' => 'Cancel a purchase',
+    ],
+    'expenses' => [
+        'read' => 'See expenses',
+        'create' => 'Add an expense',
+        'update' => 'Edit an expense',
+        'delete' => 'Remove an expense',
+    ],
+    'bank_accounts' => ['manage' => 'Manage bank accounts'],
+    'inventory' => [
+        'read' => 'See stock and items',
+        'manage' => 'Add and edit items',
+        'adjust' => 'Adjust stock',
+        'issue' => 'Issue stock',
+        'opening' => 'Enter opening stock',
+    ],
+    'rates' => [
+        'read' => "See today's rates",
+        'set' => "Set today's gold & silver rates",
+    ],
+    'vendors' => [
+        'read' => 'See vendors',
+        'manage' => 'Add and edit vendors',
+        'ledger' => "See a vendor's account statement",
+    ],
+    'accounting' => [
+        'read' => 'Open the Accounts section',
+        'manage' => 'Add and edit ledger accounts',
+        'journal' => 'Pass a manual journal entry',
+    ],
+    'users' => [
+        'read' => 'See users',
+        'manage' => 'Add and edit users',
+    ],
+    'rbac' => ['manage' => 'Manage roles & permissions'],
+    'settings' => [
+        'read' => 'See settings',
+        'manage' => 'Change shop settings',
+    ],
+    'audit' => ['read' => 'See the audit log'],
 ];
 
 $permissionIds = []; // "resource.action" => id
 foreach ($catalog as $resource => $actions) {
-    foreach ($actions as $action) {
+    foreach ($actions as $action => $label) {
         Database::execute(
-            'INSERT INTO permissions (resource, action) VALUES (:r, :a)
-             ON DUPLICATE KEY UPDATE is_active = 1',
-            ['r' => $resource, 'a' => $action]
+            'INSERT INTO permissions (resource, action, description) VALUES (:r, :a, :d)
+             ON DUPLICATE KEY UPDATE description = :d2, is_active = 1',
+            ['r' => $resource, 'a' => $action, 'd' => $label, 'd2' => $label]
         );
         $permissionIds["$resource.$action"] = (int) Database::fetchValue(
             'SELECT id FROM permissions WHERE resource = :r AND action = :a',
@@ -71,7 +131,10 @@ $roles = [
         'display' => 'Accountant', 'scope' => 'all', 'system' => 0,
         'grants' => [
             'dashboard.read',
-            'reports.read', 'reports.pnl', 'reports.accounting', 'reports.gst',
+            // NOTE: 'reports.pnl' is deliberately NOT granted — profit & loss is
+            // the owner's figure. Grant it from Settings → Roles if they want the
+            // accountant to see it too.
+            'reports.read', 'reports.accounting', 'reports.gst',
             'reports.outstanding', 'reports.stock',
             'customers.read', 'customers.create', 'customers.update', 'customers.ledger',
             'vendors.read', 'vendors.manage', 'vendors.ledger',
@@ -137,29 +200,60 @@ foreach ($roles as $slug => $def) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Owner user (admin / admin123)
+// 3. Owner users (admin / admin123 and Admin / admin@123)
+//
+// Two SEPARATE super-admin accounts on the same database, telling exactly one
+// thing apart: the username's casing. `users.username` is utf8mb4_bin, so the
+// lookup below and the unique index both distinguish `admin` from `Admin`.
+// Identical roles, identical permissions, identical data — see plan/09.
 // ---------------------------------------------------------------------------
-$adminId = Database::fetchValue('SELECT id FROM users WHERE username = :u', ['u' => 'admin']);
-if ($adminId === null) {
-    $adminId = Database::insert('users', [
-        'username' => 'admin',
-        'password_hash' => password_hash('admin123', PASSWORD_DEFAULT),
-        'full_name' => 'Owner',
-        'email' => 'admin@jewellers.local',
-        'avatar_color' => '#B8860B',
-        'must_change_password' => 0,
-    ]);
-    echo "Owner user created (admin / admin123)\n";
-}
 $superRoleId = (int) Database::fetchValue("SELECT id FROM roles WHERE name = 'super_admin'");
-Database::execute(
-    'INSERT INTO user_role_assignments (user_id, role_id) VALUES (:u, :r)
-     ON DUPLICATE KEY UPDATE is_active = 1',
-    ['u' => (int) $adminId, 'r' => $superRoleId]
-);
+$owners = [
+    ['admin', 'admin123', 'Owner', 'admin@jewellers.local', '#B8860B'],
+    ['Admin', 'admin@123', 'Administrator', 'administrator@jewellers.local', '#6C63FF'],
+];
+foreach ($owners as [$ownerName, $ownerPassword, $fullName, $ownerEmail, $color]) {
+    $ownerId = Database::fetchValue(
+        'SELECT id FROM users WHERE username COLLATE utf8mb4_bin = :u',
+        ['u' => $ownerName]
+    );
+    if ($ownerId === null) {
+        $ownerId = Database::insert('users', [
+            'username' => $ownerName,
+            'password_hash' => password_hash($ownerPassword, PASSWORD_DEFAULT),
+            'full_name' => $fullName,
+            'email' => $ownerEmail,
+            'avatar_color' => $color,
+            'must_change_password' => 0,
+        ]);
+        echo "Owner user created ({$ownerName} / {$ownerPassword})\n";
+    }
+    Database::execute(
+        'INSERT INTO user_role_assignments (user_id, role_id) VALUES (:u, :r)
+         ON DUPLICATE KEY UPDATE is_active = 1',
+        ['u' => (int) $ownerId, 'r' => $superRoleId]
+    );
+}
 
 // ---------------------------------------------------------------------------
-// 4. Purities — the daily rate is entered per purity, so pricing uses it directly
+// 4. Metals — the master behind every `metal` column. The shop can add to this
+//    from the app (Metals::create), so only the three we ship are seeded here.
+// ---------------------------------------------------------------------------
+try {
+    foreach ([['gold', 'Gold', 1], ['silver', 'Silver', 2], ['platinum', 'Platinum', 3]] as [$code, $name, $sort]) {
+        Database::execute(
+            'INSERT INTO metals (code, name, sort_order) VALUES (:c, :n, :s)
+             ON DUPLICATE KEY UPDATE name = :n2, sort_order = :s2, is_active = 1',
+            ['c' => $code, 'n' => $name, 's' => $sort, 'n2' => $name, 's2' => $sort]
+        );
+    }
+    echo "Metals: 3\n";
+} catch (Throwable) {
+    echo "Metals: skipped — run database/migrations/2026_07_30_metals_master.sql first.\n";
+}
+
+// ---------------------------------------------------------------------------
+// 4b. Purities — the daily rate is entered per purity, so pricing uses it directly
 // ---------------------------------------------------------------------------
 $purities = [
     ['gold', '24K', '24 Karat (999)', 0.9990, 1],
@@ -167,6 +261,8 @@ $purities = [
     ['gold', '18K', '18 Karat (750)', 0.7500, 3],
     ['silver', '999', 'Fine Silver (999)', 0.9990, 4],
     ['silver', '925', 'Sterling Silver (925)', 0.9250, 5],
+    // platinum needs migrations/2026_07_30_platinum.sql to have widened the enum
+    ['platinum', 'PT950', 'Platinum 950', 0.9500, 6],
 ];
 foreach ($purities as [$metal, $code, $label, $fineness, $sort]) {
     Database::execute(
@@ -242,6 +338,7 @@ $ledger($gCashBank,   'Cash in Hand',            'cash');
 $ledger($gCashBank,   'Bank Account',            'bank');
 $ledger($gInventory,  'Inventory — Gold',        'inventory', 'gold');
 $ledger($gInventory,  'Inventory — Silver',      'inventory', 'silver');
+$ledger($gInventory,  'Inventory — Platinum',    'inventory', 'platinum');
 $ledger($gInventory,  'Inventory — Old Metal',   'old_metal');
 $ledger($gReceivable, 'Walk-in Customers',       'customer');        // control ledger for walk-in bills
 $ledger($gTaxAssets,  'GST Input (Purchases)',   'gst_input');
@@ -250,6 +347,7 @@ $ledger($gTaxLiab,    'GST Payable',             'gst_output', null, 'cr');
 $ledger($gEquity,     'Opening Balances Equity', 'opening_equity', null, 'cr');
 $ledger($gSales,      'Gold Sales',              'sales', 'gold', 'cr');
 $ledger($gSales,      'Silver Sales',            'sales', 'silver', 'cr');
+$ledger($gSales,      'Platinum Sales',          'sales', 'platinum', 'cr');
 $ledger($gSales,      'Making Charges Income',   'making', null, 'cr');
 $ledger($gOtherInc,   'Round Off',               'round_off', null, 'cr');
 $ledger($gOtherInc,   'Discount Given',          'discount');        // contra-income, debit side

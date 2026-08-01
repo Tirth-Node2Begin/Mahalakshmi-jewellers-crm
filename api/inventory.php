@@ -8,9 +8,11 @@ use CRM\Core\Request;
 use CRM\Core\Response;
 use CRM\Inventory\InventoryRepository;
 use CRM\Inventory\InventoryService;
+use CRM\Support\GstVisibility;
 use CRM\Validation\Validator;
 
 $user = requireApiAuth();
+$gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
 
 if (Request::method() === 'GET') {
     requirePermission('inventory.read');
@@ -18,7 +20,7 @@ if (Request::method() === 'GET') {
 
     if ($view === 'detail') {
         $id = (int) ($_GET['id'] ?? 0);
-        $detail = InventoryRepository::detail($id);
+        $detail = InventoryRepository::detail($id, $gstVisibleOnly);
         if ($detail === null) {
             Response::error('NOT_FOUND', 'Item not found.', 404);
         }

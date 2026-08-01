@@ -2,6 +2,7 @@
 
 import { usePermissions } from "@/lib/permissions";
 import { expensesApi } from "@/features/expenses/api";
+import { AddCostModal } from "@/features/expenses/add-cost-modal";
 import { ItemModal } from "@/features/expenses/category-modals";
 import { TrackerPayModal, type PayTarget } from "@/features/expenses/tracker-pay-modal";
 import { Button } from "@/shared/ui/button";
@@ -9,7 +10,7 @@ import { Card } from "@/shared/ui/card";
 import { cn } from "@/shared/utils/cn";
 import { formatCurrency } from "@/shared/utils/format";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronLeft, ChevronRight, Lock } from "lucide-react";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Lock, Plus } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -36,6 +37,7 @@ export default function MonthlyTrackerPage() {
   const [year, setYear] = useState(defaultFyYear());
   const [payTarget, setPayTarget] = useState<PayTarget | null>(null);
   const [addItemCat, setAddItemCat] = useState<number | null>(null);
+  const [addCostOpen, setAddCostOpen] = useState(false);
   const canAddItem = can("expenses.create");
 
   const { data, isLoading } = useQuery({
@@ -62,6 +64,11 @@ export default function MonthlyTrackerPage() {
   // pay every non-system, priced, still-due item in one month column
   const nonSystem = useMemo(
     () => (data?.categories ?? []).filter((c) => c.is_system === 0),
+    [data],
+  );
+  // no line items anywhere → the grid is all dashes; show a "start here" prompt instead
+  const totalItems = useMemo(
+    () => (data?.categories ?? []).reduce((sum, c) => sum + c.items.length, 0),
     [data],
   );
   // "pay all" is pointless when every item is payroll-managed or unpriced
@@ -134,18 +141,41 @@ export default function MonthlyTrackerPage() {
         <Link href="/expenses" className="flex items-center gap-1 text-sm font-medium text-muted-foreground hover:text-foreground">
           <ArrowLeft className="h-4 w-4" aria-hidden /> Expenses
         </Link>
-        <div className="ml-auto flex items-center gap-1">
-          <Button variant="ghost" size="iconSm" onClick={() => setYear((y) => y - 1)} aria-label="Previous year">
-            <ChevronLeft className="h-4 w-4" aria-hidden />
-          </Button>
-          <span className="min-w-28 text-center text-sm font-semibold text-foreground">
-            FY {year}-{String((year + 1) % 100).padStart(2, "0")}
-          </span>
-          <Button variant="ghost" size="iconSm" onClick={() => setYear((y) => y + 1)} aria-label="Next year">
-            <ChevronRight className="h-4 w-4" aria-hidden />
-          </Button>
+        <div className="ml-auto flex items-center gap-3">
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="iconSm" onClick={() => setYear((y) => y - 1)} aria-label="Previous year">
+              <ChevronLeft className="h-4 w-4" aria-hidden />
+            </Button>
+            <span className="min-w-28 text-center text-sm font-semibold text-foreground">
+              FY {year}-{String((year + 1) % 100).padStart(2, "0")}
+            </span>
+            <Button variant="ghost" size="iconSm" onClick={() => setYear((y) => y + 1)} aria-label="Next year">
+              <ChevronRight className="h-4 w-4" aria-hidden />
+            </Button>
+          </div>
+          {canAddItem ? (
+            <Button onClick={() => setAddCostOpen(true)}>
+              <Plus className="h-4 w-4" aria-hidden /> Add cost
+            </Button>
+          ) : null}
         </div>
       </div>
+
+      {!isLoading && (data?.categories ?? []).length > 0 && totalItems === 0 ? (
+        <Card className="flex flex-wrap items-center gap-4 border border-dashed border-border">
+          <div className="min-w-52 flex-1">
+            <p className="text-sm font-semibold text-foreground">Set up your monthly costs</p>
+            <p className="mt-0.5 text-sm text-muted-foreground">
+              Add each recurring cost (rent, electricity, staff…) with its monthly amount — then mark it paid month by month below.
+            </p>
+          </div>
+          {canAddItem ? (
+            <Button onClick={() => setAddCostOpen(true)}>
+              <Plus className="h-4 w-4" aria-hidden /> Add your first cost
+            </Button>
+          ) : null}
+        </Card>
+      ) : null}
 
       <Card className="overflow-hidden p-0">
         <div className="overflow-x-auto">
@@ -186,8 +216,19 @@ export default function MonthlyTrackerPage() {
               ) : (data?.categories ?? []).length === 0 ? (
                 <tr>
                   <td colSpan={13} className="px-4 py-16 text-center text-sm text-muted-foreground">
-                    No fixed costs yet. Add them under{" "}
-                    <Link href="/expenses/categories" className="text-primary-strong hover:underline">Categories</Link>.
+                    {canAddItem ? (
+                      <span className="inline-flex flex-col items-center gap-3">
+                        No fixed costs yet.
+                        <Button onClick={() => setAddCostOpen(true)}>
+                          <Plus className="h-4 w-4" aria-hidden /> Add your first cost
+                        </Button>
+                      </span>
+                    ) : (
+                      <>
+                        No fixed costs yet. Add them under{" "}
+                        <Link href="/expenses/categories" className="text-primary-strong hover:underline">Categories</Link>.
+                      </>
+                    )}
                   </td>
                 </tr>
               ) : (
@@ -233,6 +274,14 @@ export default function MonthlyTrackerPage() {
       </p>
 
       <TrackerPayModal target={payTarget} banks={data?.bank_accounts ?? []} onClose={() => setPayTarget(null)} />
+      <AddCostModal
+        open={addCostOpen}
+        categories={nonSystem.map((c) => ({ id: c.id, name: c.name }))}
+        onClose={() => {
+          setAddCostOpen(false);
+          void invalidate();
+        }}
+      />
       <ItemModal
         open={addItemCat !== null}
         categoryId={addItemCat ?? 0}
@@ -298,6 +347,15 @@ function CategoryRows({
               >
                 <Lock className="h-3 w-3" aria-hidden /> system
               </span>
+            ) : onAddItem ? (
+              <button
+                onClick={() => onAddItem(cat.id)}
+                aria-label={`Add a cost under ${cat.name}`}
+                title={`Add a cost under ${cat.name}`}
+                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-primary-soft hover:text-primary-strong"
+              >
+                <Plus className="h-3.5 w-3.5" aria-hidden />
+              </button>
             ) : null}
           </div>
         </td>

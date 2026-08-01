@@ -6,6 +6,7 @@ namespace CRM\Jewellery;
 
 use CRM\Database\Database;
 use CRM\Support\Audit;
+use CRM\Support\GstVisibility;
 use CRM\Support\NumberSequence;
 
 /**
@@ -172,11 +173,16 @@ final class EstimateService
         Audit::log($userId, 'estimate.cancel', 'estimates', $estimateId);
     }
 
-    public static function list(array $filters = []): array
+    public static function list(array $filters = [], bool $gstVisibleOnly = false): array
     {
+        $visibleConvertedSql = $gstVisibleOnly
+            ? "(i.id IS NOT NULL AND (NOT EXISTS (SELECT 1 FROM invoice_items hidden_check WHERE hidden_check.invoice_id = i.id) OR " . GstVisibility::invoiceVisibleSql('i') . '))'
+            : 'i.id IS NOT NULL';
+        $convertedIdSql = "CASE WHEN {$visibleConvertedSql} THEN e.converted_invoice_id ELSE NULL END";
+        $invoiceNoSql = "CASE WHEN {$visibleConvertedSql} THEN i.invoice_no ELSE NULL END";
         $sql = "SELECT e.id, e.estimate_no, e.estimate_date, e.valid_until, e.status, e.grand_total,
                        COALESCE(c.name, e.walkin_name, 'Walk-in') AS customer_name,
-                       e.converted_invoice_id, i.invoice_no,
+                       {$convertedIdSql} AS converted_invoice_id, {$invoiceNoSql} AS invoice_no,
                        (e.status = 'open' AND e.valid_until < CURDATE()) AS is_expired
                   FROM estimates e
              LEFT JOIN customers c ON c.id = e.customer_id
@@ -200,16 +206,21 @@ final class EstimateService
         return Database::fetchAll($sql, $params);
     }
 
-    public static function detail(int $estimateId): ?array
+    public static function detail(int $estimateId, bool $gstVisibleOnly = false): ?array
     {
+        $visibleConvertedSql = $gstVisibleOnly
+            ? "(i.id IS NOT NULL AND (NOT EXISTS (SELECT 1 FROM invoice_items hidden_check WHERE hidden_check.invoice_id = i.id) OR " . GstVisibility::invoiceVisibleSql('i') . '))'
+            : 'i.id IS NOT NULL';
+        $invoiceNoSql = "CASE WHEN {$visibleConvertedSql} THEN i.invoice_no ELSE NULL END";
         $estimate = Database::fetchOne(
-            'SELECT e.*, c.name AS customer_name, c.mobile AS customer_mobile, c.address AS customer_address,
-                    u.full_name AS created_by_name, i.invoice_no
+            "SELECT e.*, c.name AS customer_name, c.mobile AS customer_mobile, c.address AS customer_address,
+                    u.full_name AS created_by_name, {$invoiceNoSql} AS invoice_no,
+                    CASE WHEN {$visibleConvertedSql} THEN e.converted_invoice_id ELSE NULL END AS converted_invoice_id
                FROM estimates e
           LEFT JOIN customers c ON c.id = e.customer_id
           LEFT JOIN users u ON u.id = e.created_by
           LEFT JOIN invoices i ON i.id = e.converted_invoice_id
-              WHERE e.id = :id',
+              WHERE e.id = :id",
             ['id' => $estimateId]
         );
         if ($estimate === null) {

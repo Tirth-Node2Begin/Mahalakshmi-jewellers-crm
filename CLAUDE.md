@@ -1,6 +1,6 @@
 # Jewellers CRM / ERP — Project Memory
 
-Jewellery store management system (gold + silver) for an Indian retailer. **MVP = double-entry accounting with a true P&L, weight-first inventory, vendor management, RBAC, and collision-proof multi-counter billing.**
+Jewellery store management system (gold, silver + platinum) for an Indian retailer. **MVP = double-entry accounting with a true P&L, weight-first inventory, vendor management, RBAC, and collision-proof multi-counter billing.**
 
 Codebase copied from `E:\EB projects\sejal-jewellers\sejal_jewellers_crm` on 2026-07-28 for its auth/RBAC infrastructure and **visual design system**, then stripped of the lead-CRM/HRMS/integration/website modules and rebuilt around jewellery.
 

@@ -3,7 +3,7 @@
 import {
   itemStatusTone,
   makingLabel,
-  METAL_LABEL,
+  metalLabel,
   STATUS_LABEL,
   stockApi,
   TRACKING_LABEL,
@@ -11,6 +11,7 @@ import {
 } from "@/features/stock/api";
 import { ItemFormDialog } from "@/features/stock/item-form-dialog";
 import { ItemHistoryDialog } from "@/features/stock/item-history-dialog";
+import { useMetals } from "@/features/stock/metal-select";
 import { PermissionGate, usePermissions } from "@/lib/permissions";
 import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
 import { Badge } from "@/shared/ui/badge";
@@ -21,13 +22,18 @@ import { Input } from "@/shared/ui/input";
 import { Pagination, usePagination } from "@/shared/ui/pagination";
 import { Select } from "@/shared/ui/select";
 import { SkeletonRows } from "@/shared/ui/skeleton";
+import { cn } from "@/shared/utils/cn";
 import { formatWeight } from "@/shared/utils/format";
-import { useQuery } from "@tanstack/react-query";
-import { Gem, History, Pencil, Plus } from "lucide-react";
-import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Gem, History, Pencil, Plus, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+
+const PER_PAGE = 15;
 
 export default function StockItemsPage() {
   const { can } = usePermissions();
+  const queryClient = useQueryClient();
   const [rawSearch, setRawSearch] = useState("");
   const search = useDebouncedValue(rawSearch, 300);
   const [metal, setMetal] = useState("");
@@ -39,6 +45,10 @@ export default function StockItemsPage() {
   const [formItem, setFormItem] = useState<StockItem | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [historyId, setHistoryId] = useState<number | null>(null);
+  /** The item just saved — highlighted and scrolled to, so it is not hunted for. */
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const rowRefs = useRef(new Map<number, HTMLTableRowElement>());
+  const scrolledTo = useRef<number | null>(null);
 
   const filters = {
     search: search || undefined,
@@ -53,12 +63,13 @@ export default function StockItemsPage() {
     queryKey: ["stock", "items", filters],
     queryFn: () => stockApi.items(filters),
   });
+  const { data: metalsData } = useMetals();
 
   const items = data?.items ?? [];
   const purities = data?.purities ?? [];
   const categories = data?.categories ?? [];
   const metalPurities = metal ? purities.filter((p) => p.metal === metal) : purities;
-  const { page, totalPages, pageItems, setPage } = usePagination(items, 15, [
+  const { page, totalPages, pageItems, setPage } = usePagination(items, PER_PAGE, [
     search,
     metal,
     purityId,
@@ -67,13 +78,37 @@ export default function StockItemsPage() {
     status,
   ]);
 
-  const resetFilters = () => {
+  /**
+   * Walk to the saved item: the list may have re-fetched onto another page, so
+   * turn to its page first and scroll to the row on the render after that.
+   * Scrolls once per save — a background refetch must not yank the view back.
+   */
+  useEffect(() => {
+    if (selectedId === null || scrolledTo.current === selectedId) return;
+    const index = items.findIndex((i) => i.id === selectedId);
+    if (index === -1) return;
+
+    const target = Math.floor(index / PER_PAGE) + 1;
+    if (target !== page) {
+      setPage(target);
+      return;
+    }
+    scrolledTo.current = selectedId;
+    rowRefs.current.get(selectedId)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [selectedId, items, page, setPage]);
+
+  const clearFilters = () => {
     setRawSearch("");
     setMetal("");
     setPurityId("");
     setCategoryId("");
     setTracking("");
+  };
+
+  const resetFilters = () => {
+    clearFilters();
     setStatus("");
+    setSelectedId(null);
   };
 
   const openNew = () => {
@@ -84,6 +119,33 @@ export default function StockItemsPage() {
   const openEdit = (item: StockItem) => {
     setFormItem(item);
     setFormOpen(true);
+  };
+
+  // the server refuses (409) once the item has any stock/purchase/billing
+  // history — that message is the one worth showing, so surface it as-is
+  const deleteItem = async (item: StockItem) => {
+    if (!window.confirm(`Delete “${item.name}” (${item.item_code})? This cannot be undone.`)) return;
+    try {
+      await stockApi.deleteItem(item.id);
+      toast.success("Item deleted.");
+      void queryClient.invalidateQueries({ queryKey: ["stock"] });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not delete the item.");
+    }
+  };
+
+  /**
+   * A brand-new item is in stock by definition, so show the in-stock list and drop
+   * whatever was filtered — otherwise the thing just created is off screen. An edit
+   * leaves the filters alone and only moves to the row.
+   */
+  const handleSaved = ({ id, isNew }: { id: number; isNew: boolean }) => {
+    if (isNew) {
+      clearFilters();
+      setStatus("in_stock");
+    }
+    scrolledTo.current = null; // saving the same item twice should scroll to it again
+    setSelectedId(id);
   };
 
   return (
@@ -105,8 +167,11 @@ export default function StockItemsPage() {
             className="h-11 w-auto"
           >
             <option value="">All metals</option>
-            <option value="gold">Gold</option>
-            <option value="silver">Silver</option>
+            {(metalsData?.metals ?? []).map((m) => (
+              <option key={m.code} value={m.code}>
+                {m.name}
+              </option>
+            ))}
           </Select>
           <Select value={purityId} onChange={(e) => setPurityId(e.target.value)} className="h-11 w-auto">
             <option value="">All purities</option>
@@ -175,8 +240,27 @@ export default function StockItemsPage() {
                 </thead>
                 <tbody>
                   {pageItems.map((it) => (
-                    <tr key={it.id} className="border-b border-border/50 last:border-0 hover:bg-background">
-                      <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{it.item_code}</td>
+                    <tr
+                      key={it.id}
+                      ref={(el) => {
+                        if (el) rowRefs.current.set(it.id, el);
+                        else rowRefs.current.delete(it.id);
+                      }}
+                      className={cn(
+                        "border-b border-border/50 last:border-0 hover:bg-background",
+                        // background, not a ring: Tailwind collapses table borders and a
+                        // box-shadow on <tr> clips unevenly across browsers
+                        it.id === selectedId && "bg-primary-soft hover:bg-primary-soft",
+                      )}
+                    >
+                      <td
+                        className={cn(
+                          "px-4 py-3 font-mono text-xs text-muted-foreground",
+                          it.id === selectedId && "border-l-[3px] border-primary-deep pl-[13px] text-primary-strong",
+                        )}
+                      >
+                        {it.item_code}
+                      </td>
                       <td className="px-3 py-3">
                         <button
                           onClick={() => setHistoryId(it.id)}
@@ -190,7 +274,7 @@ export default function StockItemsPage() {
                       </td>
                       <td className="px-3 py-3">
                         <Badge tone={it.metal === "silver" ? "blue" : "gold"}>
-                          {it.metal ? METAL_LABEL[it.metal] : "—"}
+                          {metalLabel(it.metal, metalsData?.metals)}
                           {it.purity_code ? ` · ${it.purity_code}` : ""}
                         </Badge>
                       </td>
@@ -215,14 +299,24 @@ export default function StockItemsPage() {
                             <History className="h-4 w-4" aria-hidden />
                           </button>
                           {can("inventory.manage") ? (
-                            <button
-                              onClick={() => openEdit(it)}
-                              className="rounded-lg p-1.5 text-muted-foreground hover:bg-background hover:text-primary-strong"
-                              title="Edit item"
-                              aria-label="Edit item"
-                            >
-                              <Pencil className="h-4 w-4" aria-hidden />
-                            </button>
+                            <>
+                              <button
+                                onClick={() => openEdit(it)}
+                                className="rounded-lg p-1.5 text-muted-foreground hover:bg-background hover:text-primary-strong"
+                                title="Edit item"
+                                aria-label="Edit item"
+                              >
+                                <Pencil className="h-4 w-4" aria-hidden />
+                              </button>
+                              <button
+                                onClick={() => void deleteItem(it)}
+                                className="rounded-lg p-1.5 text-muted-foreground hover:bg-background hover:text-attention-strong"
+                                title="Delete item"
+                                aria-label="Delete item"
+                              >
+                                <Trash2 className="h-4 w-4" aria-hidden />
+                              </button>
+                            </>
                           ) : null}
                         </div>
                       </td>
@@ -239,6 +333,7 @@ export default function StockItemsPage() {
       <ItemFormDialog
         open={formOpen}
         onClose={() => setFormOpen(false)}
+        onSaved={handleSaved}
         item={formItem}
         purities={purities}
         categories={categories}

@@ -22,9 +22,11 @@ use CRM\Database\Database;
 use CRM\Invoices\InvoiceRepository;
 use CRM\Jewellery\PaymentService;
 use CRM\Support\FiscalYear;
+use CRM\Support\GstVisibility;
 use CRM\Validation\Validator;
 
 $user = requireApiAuth();
+$gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
 
 if (Request::method() === 'GET') {
     requirePermission('payments.read');
@@ -41,12 +43,18 @@ if (Request::method() === 'GET') {
     // bills a specific customer still owes on — the "record payment" picker
     if (($_GET['view'] ?? '') === 'due') {
         $customerId = (int) ($_GET['customer_id'] ?? 0);
+        $grandTotalSql = GstVisibility::invoiceAmountSql('invoices', $gstVisibleOnly);
+        $paidAmountSql = GstVisibility::invoicePaidSql('invoices', $gstVisibleOnly);
+        $balanceSql = GstVisibility::invoiceBalanceSql('invoices', $gstVisibleOnly);
+        $visibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::invoiceVisibleSql('invoices') : '';
         Response::success([
             'invoices' => Database::fetchAll(
-                "SELECT id, invoice_no, invoice_date, grand_total, paid_amount,
-                        (grand_total - paid_amount) AS balance_due
+                "SELECT id, invoice_no, invoice_date,
+                        {$grandTotalSql} AS grand_total,
+                        {$paidAmountSql} AS paid_amount,
+                        {$balanceSql} AS balance_due
                    FROM invoices
-                  WHERE customer_id = :c AND status = 'final' AND grand_total - paid_amount > 0.01
+                  WHERE customer_id = :c AND status = 'final' AND {$balanceSql} > 0.01{$visibilitySql}
                   ORDER BY invoice_date",
                 ['c' => $customerId]
             ),
@@ -64,7 +72,8 @@ if (Request::method() === 'GET') {
             'statement' => AccountingRepository::ledgerStatement(
                 Ledgers::customer($customerId),
                 (string) ($_GET['from'] ?? $fy['start']),
-                (string) ($_GET['to'] ?? $fy['end'])
+                (string) ($_GET['to'] ?? $fy['end']),
+                $gstVisibleOnly
             ),
         ]);
     }
@@ -109,8 +118,15 @@ switch ($action) {
         }
 
         if ($invoiceId !== null) {
+            $grandTotalSql = GstVisibility::invoiceAmountSql('i', $gstVisibleOnly);
+            $paidAmountSql = GstVisibility::invoicePaidSql('i', $gstVisibleOnly);
+            $visibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::invoiceVisibleSql('i') : '';
             $invoice = Database::fetchOne(
-                'SELECT id, customer_id, status, grand_total, paid_amount FROM invoices WHERE id = :id',
+                "SELECT i.id, i.customer_id, i.status,
+                        {$grandTotalSql} AS grand_total,
+                        {$paidAmountSql} AS paid_amount
+                   FROM invoices i
+                  WHERE i.id = :id{$visibilitySql}",
                 ['id' => $invoiceId]
             );
             if ($invoice === null) {
@@ -147,11 +163,18 @@ switch ($action) {
 
     case 'cancel':
         requirePermission('payments.cancel');
+        $paymentId = (int) ($body['id'] ?? 0);
+        if ($gstVisibleOnly && Database::fetchValue(
+            'SELECT 1 FROM invoice_payments p WHERE p.id = :id AND ' . GstVisibility::paymentVisibleSql('p') . ' LIMIT 1',
+            ['id' => $paymentId]
+        ) === null) {
+            Response::error('NOT_FOUND', 'Payment not found.', 404);
+        }
         $reason = trim((string) ($body['reason'] ?? ''));
         if ($reason === '') {
             Response::error('VALIDATION_ERROR', 'Please say why.', 422, ['reason' => 'A reason is required.']);
         }
-        PaymentService::cancel('customer', (int) ($body['id'] ?? 0), $reason, $user->id);
+        PaymentService::cancel('customer', $paymentId, $reason, $user->id);
         Response::success(['message' => 'Payment cancelled.']);
 
     default:

@@ -3,7 +3,7 @@
 import { PAYMENT_MODE_LABEL } from "@/features/purchases/api";
 import { VendorLedgerPanel } from "@/features/vendors/ledger-panel";
 import { RecordVendorPaymentDialog } from "@/features/vendors/record-payment-dialog";
-import { vendorPaymentsApi } from "@/features/vendors/payments-api";
+import { vendorPaymentsApi, type VendorPayment } from "@/features/vendors/payments-api";
 import { PermissionGate, usePermissions } from "@/lib/permissions";
 import { ApiError } from "@/shared/api/api-error";
 import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
@@ -23,7 +23,7 @@ import { addDaysStr, formatCurrency, formatDate, localDateString } from "@/share
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, BookOpen, IndianRupee, Plus, Wallet } from "lucide-react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -31,6 +31,7 @@ type Tab = "payments" | "ledger";
 
 function VendorPaymentsInner() {
   const params = useSearchParams();
+  const router = useRouter();
   const { can } = usePermissions();
   const queryClient = useQueryClient();
 
@@ -92,6 +93,13 @@ function VendorPaymentsInner() {
   const openRecord = () => {
     setPrefill({ supplierId: supplierId ? Number(supplierId) : undefined });
     setPayOpen(true);
+  };
+
+  /** Row click → the bill this payment settled, or the vendor if it was on account. */
+  const openPayment = (p: VendorPayment) => {
+    router.push(
+      p.purchase_id ? `/purchases/detail?id=${p.purchase_id}` : `/vendors/detail?id=${p.supplier_id}`,
+    );
   };
 
   const cancelPayment = async () => {
@@ -218,11 +226,34 @@ function VendorPaymentsInner() {
                 </thead>
                 <tbody>
                   {pageItems.map((p) => (
-                    <tr key={p.id} className="border-b border-border/50 last:border-0 hover:bg-background">
+                    <tr
+                      key={p.id}
+                      // clicking the row opens the bill this payment settled;
+                      // an on-account payment has no bill, so it opens the vendor
+                      onClick={() => openPayment(p)}
+                      role="link"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openPayment(p);
+                        }
+                      }}
+                      title={p.purchase_no ? `Open bill ${p.purchase_no}` : `Open ${p.vendor_name}`}
+                      className="cursor-pointer border-b border-border/50 last:border-0 hover:bg-background focus:bg-background focus:outline-none"
+                    >
                       <td className="px-4 py-3 font-mono text-xs text-foreground">{p.payment_no}</td>
                       <td className="px-3 py-3 text-muted-foreground">{formatDate(p.payment_date)}</td>
                       <td className="px-3 py-3 font-medium text-foreground">{p.vendor_name}</td>
-                      <td className="px-3 py-3 font-mono text-xs text-muted-foreground">{p.purchase_no ?? "On account"}</td>
+                      <td className="px-3 py-3 font-mono text-xs">
+                        {p.purchase_no ? (
+                          <span className="text-primary-strong underline-offset-2 group-hover:underline">
+                            {p.purchase_no}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">On account</span>
+                        )}
+                      </td>
                       <td className="px-3 py-3 text-foreground">
                         {PAYMENT_MODE_LABEL[p.payment_mode] ?? p.payment_mode}
                         {p.account_name ? <span className="block text-xs text-muted-foreground">{p.account_name}</span> : null}
@@ -237,7 +268,8 @@ function VendorPaymentsInner() {
                             <Badge tone="coral">Cancelled</Badge>
                           ) : can("payments.cancel") ? (
                             <button
-                              onClick={() => {
+                              onClick={(e) => {
+                                e.stopPropagation(); // don't open the bill behind it
                                 setCancelling({ id: p.id, payment_no: p.payment_no });
                                 setCancelReason("");
                                 setCancelError(null);

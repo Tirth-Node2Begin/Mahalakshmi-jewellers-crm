@@ -82,37 +82,56 @@ export function VendorLedgerPanel({ supplierId }: { supplierId: number | null })
           <thead>
             <tr className="border-y border-border bg-background text-left text-xs font-semibold uppercase tracking-[0.4px] text-muted-foreground">
               <th className="px-4 py-3">Date</th>
-              <th className="px-3 py-3">Entry</th>
-              <th className="px-3 py-3">Detail</th>
-              <th className="px-3 py-3 text-right">You paid</th>
-              <th className="px-3 py-3 text-right">You were billed</th>
-              <th className="px-4 py-3 text-right">Balance owed</th>
+              <th className="px-3 py-3">Particulars</th>
+              <th className="px-3 py-3">Voucher</th>
+              <th className="border-l border-border px-3 py-3 text-right">
+                You paid<span className="ml-1 font-normal normal-case text-muted-foreground/70">(Debit)</span>
+              </th>
+              <th className="border-l border-border px-3 py-3 text-right">
+                You were billed<span className="ml-1 font-normal normal-case text-muted-foreground/70">(Credit)</span>
+              </th>
+              <th className="border-l border-border px-4 py-3 text-right">Balance owed</th>
             </tr>
           </thead>
           <tbody>
             <tr className="border-b border-border/50 bg-background/60">
-              <td className="px-4 py-3 text-muted-foreground" colSpan={5}>
+              <td className="px-4 py-3 text-muted-foreground" colSpan={3}>
                 Opening balance
               </td>
-              <td className="px-4 py-3 text-right font-semibold tabular-nums text-foreground">
+              <td className="border-l border-border px-3 py-3" />
+              <td className="border-l border-border px-3 py-3" />
+              <td className="whitespace-nowrap border-l border-border px-4 py-3 text-right font-semibold tabular-nums text-foreground">
                 {formatCurrency(Math.abs(openingOwed), true)}
                 {openingOwed < -0.005 ? " advance" : ""}
               </td>
             </tr>
-            {s.entries.map((e, i) => {
+            {s.entries.map((e) => {
               const owed = payableFromLedger(e.balance, e.balance_type);
+              const isDebit = Number(e.dr_amount) > 0;
               return (
-                <tr key={`${e.voucher_id}-${i}`} className="border-b border-border/50 last:border-0">
-                  <td className="px-4 py-3 text-muted-foreground">{formatDate(e.vdate)}</td>
-                  <td className="px-3 py-3 font-mono text-xs text-muted-foreground">{e.voucher_no}</td>
-                  <td className="px-3 py-3 text-foreground">{e.narration ?? e.vtype}</td>
-                  <td className="px-3 py-3 text-right tabular-nums text-muted-foreground">
-                    {Number(e.dr_amount) > 0 ? formatCurrency(e.dr_amount, true) : "—"}
+                <tr key={e.entry_id} className="border-b border-border/50 align-top last:border-0">
+                  <td className="whitespace-nowrap px-4 py-3 text-muted-foreground">{formatDate(e.vdate)}</td>
+                  <td className="px-3 py-3">
+                    {/* what this entry was against, not just the voucher note */}
+                    <span className="font-medium text-foreground">{e.particulars}</span>
+                    {e.narration ? <span className="block text-xs text-muted-foreground">{e.narration}</span> : null}
                   </td>
-                  <td className="px-3 py-3 text-right tabular-nums text-muted-foreground">
-                    {Number(e.cr_amount) > 0 ? formatCurrency(e.cr_amount, true) : "—"}
+                  <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-muted-foreground">{e.voucher_no}</td>
+                  <td className="border-l border-border px-3 py-3 text-right tabular-nums">
+                    {isDebit ? (
+                      <span className="font-medium text-foreground">{formatCurrency(e.dr_amount, true)}</span>
+                    ) : (
+                      <span className="text-muted-foreground/40">—</span>
+                    )}
                   </td>
-                  <td className="px-4 py-3 text-right font-medium tabular-nums text-foreground">
+                  <td className="border-l border-border px-3 py-3 text-right tabular-nums">
+                    {!isDebit ? (
+                      <span className="font-medium text-foreground">{formatCurrency(e.cr_amount, true)}</span>
+                    ) : (
+                      <span className="text-muted-foreground/40">—</span>
+                    )}
+                  </td>
+                  <td className="whitespace-nowrap border-l border-border px-4 py-3 text-right font-medium tabular-nums text-foreground">
                     {formatCurrency(Math.abs(owed), true)}
                     {owed < -0.005 ? " adv." : ""}
                   </td>
@@ -126,11 +145,23 @@ export function VendorLedgerPanel({ supplierId }: { supplierId: number | null })
                 </td>
               </tr>
             ) : null}
+            <tr className="border-t-2 border-border bg-background/60">
+              <td className="px-4 py-3 font-semibold text-foreground" colSpan={3}>
+                Total for this period
+              </td>
+              <td className="whitespace-nowrap border-l border-border px-3 py-3 text-right font-semibold tabular-nums text-foreground">
+                {formatCurrency(s.total_debit, true)}
+              </td>
+              <td className="whitespace-nowrap border-l border-border px-3 py-3 text-right font-semibold tabular-nums text-foreground">
+                {formatCurrency(s.total_credit, true)}
+              </td>
+              <td className="border-l border-border px-4 py-3" />
+            </tr>
             <tr className="border-t border-border bg-background/60">
               <td className="px-4 py-3 font-semibold text-foreground" colSpan={5}>
                 Closing balance
               </td>
-              <td className="px-4 py-3 text-right font-bold tabular-nums text-foreground">
+              <td className="whitespace-nowrap border-l border-border px-4 py-3 text-right font-bold tabular-nums text-foreground">
                 {formatCurrency(Math.abs(closingOwed), true)}
                 {closingOwed < -0.005 ? " advance" : ""}
               </td>

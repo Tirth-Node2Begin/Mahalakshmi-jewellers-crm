@@ -8,10 +8,11 @@
 export type Num = number | string;
 
 export type PriceMode = "exclusive" | "inclusive";
+export type BillTaxMode = PriceMode | "without_gst";
 export type MakingType = "per_gram" | "fixed" | "percent";
-export type TaxTreatment = "taxable" | "exempt" | "nil_rated" | "non_gst" | "reverse_charge";
+export type TaxTreatment = "taxable" | "non_gst";
 export type PaymentMode = "cash" | "bank" | "upi" | "cheque" | "card";
-export type Metal = "gold" | "silver";
+export type Metal = "gold" | "silver" | "platinum";
 export type Tracking = "tagged" | "bulk";
 
 export type InvoiceStatus = "draft" | "final" | "cancelled";
@@ -53,6 +54,14 @@ export interface StockItem {
   barcode: string | null;
   purity_id: number | null;
   purity_code: string | null;
+  category_id?: number | null;
+  category_name?: string | null;
+}
+
+/** A category with something sellable in it — the filter chips on item search. */
+export interface ItemCategory {
+  id: number;
+  name: string;
 }
 
 /* -------------------------------------------------------------- bill: read */
@@ -78,6 +87,7 @@ export interface InvoiceListResponse {
   invoices: InvoiceListRow[];
   rates_set_today: boolean;
   purities: Purity[];
+  categories: ItemCategory[];
   bank_accounts: BankAccount[];
 }
 
@@ -207,6 +217,7 @@ export interface EstimateListRow {
 export interface EstimateListResponse {
   estimates: EstimateListRow[];
   purities: Purity[];
+  categories: ItemCategory[];
 }
 
 export interface EstimateItemRow {

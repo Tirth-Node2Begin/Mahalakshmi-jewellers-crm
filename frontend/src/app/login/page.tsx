@@ -4,6 +4,7 @@ import { useAuth } from "@/lib/auth";
 import { ApiError } from "@/shared/api/api-error";
 import { Button } from "@/shared/ui/button";
 import { FieldError, Input, Label } from "@/shared/ui/input";
+import { PasswordInput } from "@/shared/ui/password-input";
 import { STORAGE_KEYS } from "@/configs/app.config";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AnimatePresence, motion } from "framer-motion";
@@ -174,9 +175,8 @@ export default function LoginPage() {
 
                 <div>
                   <Label htmlFor="password" required>Password</Label>
-                  <Input
+                  <PasswordInput
                     id="password"
-                    type="password"
                     autoComplete="current-password"
                     className="bg-background"
                     aria-invalid={!!errors.password}

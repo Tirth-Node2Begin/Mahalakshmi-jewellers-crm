@@ -77,6 +77,7 @@ export function OldMetalPanel({
                       >
                         <option value="gold">Gold</option>
                         <option value="silver">Silver</option>
+                        <option value="platinum">Platinum</option>
                       </select>
                     </td>
                     <td className="py-2.5">

@@ -10,10 +10,12 @@ import {
   ReportToolbar,
 } from "@/features/books/report-shell";
 import { downloadCsv, fiscalYear } from "@/features/books/report-utils";
+import { usePermissions } from "@/lib/permissions";
+import { EmptyState } from "@/shared/ui/empty-state";
 import { cn } from "@/shared/utils/cn";
 import { formatCurrency } from "@/shared/utils/format";
 import { useQuery } from "@tanstack/react-query";
-import { ChartLine } from "lucide-react";
+import { ChartLine, Lock } from "lucide-react";
 import { useState } from "react";
 
 function buildCsv(pnl: Pnl) {
@@ -33,12 +35,28 @@ function buildCsv(pnl: Pnl) {
 
 export default function ProfitAndLossPage() {
   const fy = fiscalYear();
+  const { can } = usePermissions();
   const [range, setRange] = useState({ from: fy.from, to: fy.to });
+
+  // profit is the owner's figure — anyone else gets a plain explanation rather
+  // than a failed request. books.php enforces this server-side regardless.
+  const allowed = can("reports.pnl");
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ["books", "pnl", range.from, range.to],
     queryFn: () => booksApi.pnl(range.from, range.to),
+    enabled: allowed,
   });
+
+  if (!allowed) {
+    return (
+      <EmptyState
+        icon={Lock}
+        title="Profit & Loss is not open to you"
+        hint="Only the owner can see the shop's profit. Ask them to grant it from Settings → Roles if you need it."
+      />
+    );
+  }
 
   const pnl = data?.pnl;
   const empty =

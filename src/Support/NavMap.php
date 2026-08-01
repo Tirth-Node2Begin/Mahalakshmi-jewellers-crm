@@ -70,8 +70,10 @@ final class NavMap
         '/purchases/detail' => '/purchases',
         '/purchases/create' => '/purchases',    // reached from the button on /purchases
         '/inventory/detail' => '/inventory',
+        '/accounting/ledger' => '/accounting',   // ledger statement opened from a COA row
         '/reports/trial-balance' => '/reports',
         '/reports/gst' => '/reports',
+        '/reports/ledger-view' => '/reports',
         '/reports/outstanding' => '/reports',
         '/reports/stock' => '/reports',
         '/reports/daybook' => '/reports',

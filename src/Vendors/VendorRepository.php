@@ -43,6 +43,10 @@ final class VendorRepository
         );
     }
 
+    /**
+     * Everything the vendor profile page shows: the party record, what we bought,
+     * what we paid, what they supplied, and the net position.
+     */
     public static function detail(int $id): ?array
     {
         $vendor = Database::fetchOne('SELECT * FROM suppliers WHERE id = :id', ['id' => $id]);
@@ -50,30 +54,76 @@ final class VendorRepository
             return null;
         }
         $items = Database::fetchAll(
-            "SELECT id, item_code, name, jw_status, current_stock FROM inventory_items WHERE vendor_id = :id ORDER BY id DESC LIMIT 50",
+            // `status` was called `jw_status` before the jewellery migration renamed it
+            "SELECT id, item_code, name, status, current_stock FROM inventory_items WHERE vendor_id = :id ORDER BY id DESC LIMIT 50",
             ['id' => $id]
         );
-        // Purchase history + spend summary — "how much have we bought from this partner".
+        // Purchase history — carries paid / balance so the profile never has to
+        // re-derive "still to pay" from payment_status (which ignores part payments).
         $purchases = Database::fetchAll(
-            "SELECT id, purchase_no, purchase_date, status, grand_total, payment_status
+            "SELECT id, purchase_no, purchase_date, status, invoice_ref, grand_total, paid_amount,
+                    GREATEST(grand_total - paid_amount, 0) AS balance_due, payment_status
              FROM purchases WHERE supplier_id = :id ORDER BY purchase_date DESC, id DESC LIMIT 50",
             ['id' => $id]
         );
+        $payments = Database::fetchAll(
+            "SELECT vp.id, vp.payment_no, vp.payment_date, vp.payment_mode, vp.amount, vp.ref_no, vp.status,
+                    p.purchase_no, ba.account_name
+             FROM vendor_payments vp
+             LEFT JOIN purchases p ON p.id = vp.purchase_id
+             LEFT JOIN bank_accounts ba ON ba.id = vp.bank_account_id
+             WHERE vp.supplier_id = :id
+             ORDER BY vp.payment_date DESC, vp.id DESC LIMIT 50",
+            ['id' => $id]
+        );
+
+        // Spend summary — cancelled bills and cancelled payments are excluded, so
+        // these tie back to the vendor ledger rather than to the purchases table alone.
         $spend = Database::fetchOne(
             "SELECT COUNT(*) AS purchase_count,
-                    COALESCE(SUM(CASE WHEN status = 'received' THEN grand_total ELSE 0 END), 0) AS total_purchased,
-                    COALESCE(SUM(CASE WHEN status = 'received' AND payment_status = 'unpaid' THEN grand_total ELSE 0 END), 0) AS unpaid_amount
+                    COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN grand_total ELSE 0 END), 0) AS total_purchased,
+                    COALESCE(SUM(CASE WHEN status <> 'cancelled' THEN GREATEST(grand_total - paid_amount, 0) ELSE 0 END), 0) AS unpaid_amount,
+                    MAX(CASE WHEN status <> 'cancelled' THEN purchase_date END) AS last_purchase_date
              FROM purchases WHERE supplier_id = :id",
             ['id' => $id]
         ) ?? [];
+        $paid = Database::fetchOne(
+            "SELECT COUNT(*) AS payment_count,
+                    COALESCE(SUM(amount), 0) AS total_paid,
+                    MAX(payment_date) AS last_payment_date
+             FROM vendor_payments WHERE supplier_id = :id AND status = 'active'",
+            ['id' => $id]
+        ) ?? [];
+
+        $openingCr = ((string) ($vendor['opening_type'] ?? 'cr')) === 'cr'
+            ? (float) ($vendor['opening_balance'] ?? 0)
+            : -(float) ($vendor['opening_balance'] ?? 0);
+        $totalPurchased = (float) ($spend['total_purchased'] ?? 0);
+        $totalPaid = (float) ($paid['total_paid'] ?? 0);
+
         $summary = [
-            'total_purchased' => (float) ($spend['total_purchased'] ?? 0),
+            'total_purchased' => $totalPurchased,
+            'total_paid' => $totalPaid,
+            // What we still owe overall: opening + billed − paid. Negative = advance with them.
+            'balance_due' => round($openingCr + $totalPurchased - $totalPaid, 2),
+            // Bill-wise arrears (ignores on-account advances) — what the "due bills" picker offers.
             'unpaid_amount' => (float) ($spend['unpaid_amount'] ?? 0),
+            'opening_balance' => $openingCr,
             'purchase_count' => (int) ($spend['purchase_count'] ?? 0),
+            'payment_count' => (int) ($paid['payment_count'] ?? 0),
             // real total — the items list above is capped at 50 rows for display
             'item_count' => (int) Database::fetchValue('SELECT COUNT(*) FROM inventory_items WHERE vendor_id = :id', ['id' => $id]),
+            'last_purchase_date' => $spend['last_purchase_date'] ?? null,
+            'last_payment_date' => $paid['last_payment_date'] ?? null,
         ];
-        return ['vendor' => $vendor, 'items' => $items, 'purchases' => $purchases, 'summary' => $summary];
+
+        return [
+            'vendor' => $vendor,
+            'items' => $items,
+            'purchases' => $purchases,
+            'payments' => $payments,
+            'summary' => $summary,
+        ];
     }
 
     /** @return list<array<string,mixed>> */

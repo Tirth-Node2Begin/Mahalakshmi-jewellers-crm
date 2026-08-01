@@ -29,6 +29,10 @@ if (Request::method() === 'GET') {
         Response::success(['vendors' => VendorRepository::pickList($makersOnly)]);
     }
 
+    if ($view === 'types') {
+        Response::success(['types' => VendorService::customTypes()]);
+    }
+
     Response::success([
         'vendors' => VendorRepository::list([
             'vendor_type' => $_GET['vendor_type'] ?? null,
@@ -48,6 +52,10 @@ switch ($action) {
         requirePermission('vendors.manage');
         $id = VendorService::save($body, $user);
         Response::success(['message' => 'Vendor saved.', 'id' => $id]);
+
+    case 'add_type':
+        requirePermission('vendors.manage');
+        Response::success(['message' => 'Type added.', 'type' => VendorService::addType($body, $user)]);
 
     case 'toggle':
         requirePermission('vendors.manage');

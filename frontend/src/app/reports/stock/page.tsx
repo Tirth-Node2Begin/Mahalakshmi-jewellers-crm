@@ -15,7 +15,7 @@ import { useMemo, useState } from "react";
 
 type Tab = "summary" | "dead";
 
-const METAL_LABEL: Record<string, string> = { gold: "Gold", silver: "Silver" };
+const METAL_LABEL: Record<string, string> = { gold: "Gold", silver: "Silver", platinum: "Platinum" };
 const TRACKING_LABEL: Record<string, string> = { tagged: "Tagged pieces", bulk: "Bulk / loose" };
 
 const label = (map: Record<string, string>, key: string | null | undefined) =>

@@ -16,8 +16,9 @@ import { FieldError, Label } from "@/shared/ui/input";
 import { SkeletonCard } from "@/shared/ui/skeleton";
 import { Textarea } from "@/shared/ui/textarea";
 import { formatCurrency, formatDate, formatWeight } from "@/shared/utils/format";
+import { PurchasePrintSheet } from "@/features/purchases/purchase-print-sheet";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, Ban, Wallet } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Ban, Printer, Wallet } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
@@ -104,6 +105,9 @@ function PurchaseDetailInner() {
         ) : (
           <Badge tone={paymentStateTone(due, paid)}>{paymentStateLabel(due, paid)}</Badge>
         )}
+        <Button variant="secondary" size="sm" onClick={() => window.print()}>
+          <Printer className="h-4 w-4" aria-hidden /> Print
+        </Button>
         {!cancelled && can("purchases.cancel") ? (
           <Button variant="destructive" size="sm" onClick={() => setCancelOpen(true)}>
             <Ban className="h-4 w-4" aria-hidden /> Cancel purchase
@@ -279,6 +283,12 @@ function PurchaseDetailInner() {
           <FieldError message={cancelError ?? undefined} />
         </div>
       </Dialog>
+
+      {/* the paper version — hidden on screen; @media print in globals.css
+          prints ONLY this sheet, so the cards above never reach the paper */}
+      <div className="hidden print:block">
+        <PurchasePrintSheet purchase={p} />
+      </div>
     </div>
   );
 }

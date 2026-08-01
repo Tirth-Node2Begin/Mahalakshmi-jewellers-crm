@@ -20,9 +20,11 @@ use CRM\Jewellery\BillingService;
 use CRM\Jewellery\InvoiceDraft;
 use CRM\Jewellery\RateService;
 use CRM\Support\Audit;
+use CRM\Support\GstVisibility;
 use CRM\Validation\Validator;
 
 $user = requireApiAuth();
+$gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
 
 // cost figures (and therefore margins) are only for those who can see the books
 $canSeeCost = checkPermission('reports.stock') || checkPermission('accounting.read');
@@ -32,7 +34,7 @@ if (Request::method() === 'GET') {
     $view = (string) ($_GET['view'] ?? 'list');
 
     if ($view === 'detail') {
-        $invoice = BillingRepository::detail((int) ($_GET['id'] ?? 0), $canSeeCost);
+        $invoice = BillingRepository::detail((int) ($_GET['id'] ?? 0), $canSeeCost, $gstVisibleOnly);
         if ($invoice === null) {
             Response::error('NOT_FOUND', 'Bill not found.', 404);
         }
@@ -40,7 +42,7 @@ if (Request::method() === 'GET') {
     }
 
     if ($view === 'held') {
-        Response::success(['held' => BillingRepository::heldBills($user->id)]);
+        Response::success(['held' => BillingRepository::heldBills($user->id, $gstVisibleOnly)]);
     }
 
     if ($view === 'lookup') {
@@ -57,7 +59,8 @@ if (Request::method() === 'GET') {
     }
 
     if ($view === 'search_items') {
-        Response::success(['items' => BillingRepository::searchItems(trim((string) ($_GET['term'] ?? '')))]);
+        $categoryId = ($_GET['category_id'] ?? '') !== '' ? (int) $_GET['category_id'] : null;
+        Response::success(['items' => BillingRepository::searchItems(trim((string) ($_GET['term'] ?? '')), $categoryId)]);
     }
 
     // default: the bill list, plus what the billing screen needs to open
@@ -68,9 +71,10 @@ if (Request::method() === 'GET') {
             'to' => $_GET['to'] ?? null,
             'customer_id' => $_GET['customer_id'] ?? null,
             'search' => $_GET['search'] ?? null,
-        ]),
+        ], gstVisibleOnly: $gstVisibleOnly),
         'rates_set_today' => RateService::ratesSetFor(),
         'purities' => RateService::purities(),
+        'categories' => BillingRepository::saleCategories(),
         'bank_accounts' => Database::fetchAll(
             'SELECT id, account_name FROM bank_accounts WHERE is_active = 1 ORDER BY account_name'
         ),
@@ -114,7 +118,7 @@ switch ($action) {
         );
         Response::success([
             'id' => $invoiceId,
-            'invoice' => BillingRepository::detail($invoiceId, $canSeeCost),
+            'invoice' => BillingRepository::detail($invoiceId, $canSeeCost, $gstVisibleOnly),
             'message' => 'Draft saved.',
         ]);
         // no break — Response::success() exits
@@ -131,7 +135,6 @@ switch ($action) {
         if ($invoiceId <= 0) {
             Response::error('VALIDATION_ERROR', 'Which bill?', 422);
         }
-
         $payments = is_array($body['payments'] ?? null) ? $body['payments'] : [];
         foreach ($payments as $payment) {
             if (!in_array($payment['mode'] ?? '', ['cash', 'bank', 'upi', 'cheque', 'card'], true)) {
@@ -142,7 +145,7 @@ switch ($action) {
         BillingService::finalize($invoiceId, ['payments' => $payments], $user->id);
         Response::success([
             'id' => $invoiceId,
-            'invoice' => BillingRepository::detail($invoiceId, $canSeeCost),
+            'invoice' => BillingRepository::detail($invoiceId, $canSeeCost, $gstVisibleOnly),
             'message' => 'Bill saved.',
         ]);
 
@@ -162,7 +165,11 @@ switch ($action) {
         requirePermission('invoices.read');
         $invoiceId = (int) ($body['id'] ?? 0);
         Audit::log($user->id, 'invoice.reprint', 'invoices', $invoiceId);
-        Response::success(['invoice' => BillingRepository::detail($invoiceId, $canSeeCost)]);
+        $invoice = BillingRepository::detail($invoiceId, $canSeeCost, $gstVisibleOnly);
+        if ($invoice === null) {
+            Response::error('NOT_FOUND', 'Bill not found.', 404);
+        }
+        Response::success(['invoice' => $invoice]);
 
     default:
         Response::error('BAD_REQUEST', 'Unknown action.', 400);

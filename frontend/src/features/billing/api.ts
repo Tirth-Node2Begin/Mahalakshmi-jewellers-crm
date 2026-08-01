@@ -20,7 +20,13 @@ export const billingApi = {
   held: () => api.get<{ held: HeldBill[] }>("invoices.php", { view: "held" }),
   /** barcode / tag / HUID scan — 404 when nothing in stock matches */
   lookup: (term: string) => api.get<{ item: StockItem }>("invoices.php", { view: "lookup", term }),
-  searchItems: (term: string) => api.get<{ items: StockItem[] }>("invoices.php", { view: "search_items", term }),
+  /** Empty term = browse mode — the first items by name, optionally one category. */
+  searchItems: (term: string, categoryId?: number | null) =>
+    api.get<{ items: StockItem[] }>("invoices.php", {
+      view: "search_items",
+      term,
+      category_id: categoryId ?? undefined,
+    }),
 
   draftSave: (payload: Record<string, unknown>) =>
     api.post<{ id: number; invoice: InvoiceDetail; message: string }>("invoices.php", {

@@ -5,6 +5,7 @@ import { api } from "@/shared/api/http-client";
 import { ApiError } from "@/shared/api/api-error";
 import { Button } from "@/shared/ui/button";
 import { FieldError, Input, Label } from "@/shared/ui/input";
+import { PasswordInput } from "@/shared/ui/password-input";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { KeyRound } from "lucide-react";
 import { useForm } from "react-hook-form";
@@ -65,9 +66,9 @@ export function ForcedPasswordChange() {
         <form onSubmit={onSubmit} className="mt-8 space-y-5" noValidate>
           <div>
             <Label htmlFor="current_password" required>Current password</Label>
-            <Input
+            <PasswordInput
               id="current_password"
-              type="password"
+              
               autoComplete="current-password"
               aria-invalid={!!errors.current_password}
               {...register("current_password")}
@@ -76,9 +77,9 @@ export function ForcedPasswordChange() {
           </div>
           <div>
             <Label htmlFor="password" required>New password</Label>
-            <Input
+            <PasswordInput
               id="password"
-              type="password"
+              
               autoComplete="new-password"
               aria-invalid={!!errors.password}
               {...register("password")}
@@ -87,9 +88,9 @@ export function ForcedPasswordChange() {
           </div>
           <div>
             <Label htmlFor="confirm" required>Confirm new password</Label>
-            <Input
+            <PasswordInput
               id="confirm"
-              type="password"
+              
               autoComplete="new-password"
               aria-invalid={!!errors.confirm}
               {...register("confirm")}

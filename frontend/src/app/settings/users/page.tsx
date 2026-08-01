@@ -10,6 +10,7 @@ import { Card } from "@/shared/ui/card";
 import { Dialog } from "@/shared/ui/dialog";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { FieldError, Input, Label } from "@/shared/ui/input";
+import { PasswordInput } from "@/shared/ui/password-input";
 import { SkeletonRows } from "@/shared/ui/skeleton";
 import { relativeTime } from "@/shared/utils/format";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -242,7 +243,7 @@ function CreateUserDialog({
           </div>
           <div>
             <Label htmlFor="new_password" required>Temporary password</Label>
-            <Input id="new_password" type="password" autoComplete="new-password" {...form.register("password")} aria-invalid={!!form.formState.errors.password} />
+            <PasswordInput id="new_password"  autoComplete="new-password" {...form.register("password")} aria-invalid={!!form.formState.errors.password} />
             <FieldError message={form.formState.errors.password?.message} />
           </div>
         </div>
@@ -436,9 +437,8 @@ function ResetPasswordDialog({ user, onClose, onSaved }: { user: UserRow | null;
         </div>
         <div>
           <Label htmlFor="temp_password">Temporary password (optional)</Label>
-          <Input
+          <PasswordInput
             id="temp_password"
-            type="password"
             autoComplete="new-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}

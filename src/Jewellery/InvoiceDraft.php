@@ -237,7 +237,7 @@ final class InvoiceDraft
         $total = 0.0;
 
         foreach ($rows as $row) {
-            $metal = ($row['metal'] ?? 'gold') === 'silver' ? 'silver' : 'gold';
+            $metal = Metals::normalise($row['metal'] ?? null);
             $purityId = !empty($row['purity_id']) ? (int) $row['purity_id'] : null;
 
             $ratePerGram = isset($row['rate_per_gram']) ? (float) $row['rate_per_gram'] : 0.0;

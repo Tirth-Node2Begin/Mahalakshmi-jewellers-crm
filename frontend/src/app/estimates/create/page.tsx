@@ -10,10 +10,12 @@ import {
   num,
 } from "@/features/billing/calc";
 import { CustomerStrip } from "@/features/billing/customer-strip";
+import { ItemDetailsDialog } from "@/features/billing/item-details-dialog";
 import { ItemSearch } from "@/features/billing/item-search";
 import { LineItemsTable } from "@/features/billing/line-items-table";
 import { TotalsPanel } from "@/features/billing/totals-panel";
 import type { BillCustomer, BillLine, EstimateDetail, PriceMode } from "@/features/billing/types";
+import { usePageHeader } from "@/components/shell/page-header";
 import { usePermissions } from "@/lib/permissions";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
@@ -45,6 +47,10 @@ function EstimateBuilder() {
   const defaultTaxRate = useDefaultTaxRate();
 
   const [estimateId, setEstimateId] = useState<number | null>(urlId);
+  usePageHeader(
+    estimateId ? "Edit Estimate" : "New Estimate",
+    "Nothing is sold and no stock moves until this becomes a bill.",
+  );
   const [customer, setCustomer] = useState<BillCustomer | null>(null);
   const [walkin, setWalkin] = useState({ name: "", phone: "" });
   const [estimateDate, setEstimateDate] = useState(localDateString());
@@ -53,6 +59,7 @@ function EstimateBuilder() {
   const [discount, setDiscount] = useState(0);
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<BillLine[]>([]);
+  const [editing, setEditing] = useState<{ line: BillLine; isNew: boolean } | null>(null);
   const [saving, setSaving] = useState(false);
 
   // rates + purities so a scanned item can be priced at today's rate
@@ -62,6 +69,7 @@ function EstimateBuilder() {
     staleTime: 60_000,
   });
   const purities = meta?.purities ?? [];
+  const categories = meta?.categories ?? [];
 
   const { data: existing, isLoading: loadingExisting } = useQuery({
     queryKey: ["estimates", "detail", urlId],
@@ -120,8 +128,24 @@ function EstimateBuilder() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [existing]);
 
-  const patchLine = (key: string, patch: Partial<BillLine>) =>
-    setLines((current) => current.map((line) => (line.key === key ? { ...line, ...patch } : line)));
+  /**
+   * Quoted lines go through the same step-by-step details dialog the bill uses.
+   * A tagged piece already knows its weights and rate, so it drops straight in.
+   */
+  const onPickItem = (line: BillLine) => {
+    if (line.tracking === "bulk") {
+      setEditing({ line, isNew: true });
+      return;
+    }
+    setLines((current) => [...current, line]);
+  };
+
+  const onSaveDetails = (line: BillLine) => {
+    setLines((current) =>
+      editing?.isNew ? [...current, line] : current.map((row) => (row.key === line.key ? line : row)),
+    );
+    setEditing(null);
+  };
 
   // an estimate is never rounded to the rupee — the bill does that
   const totals = billTotals(lines, [], discount, priceMode, false);
@@ -133,6 +157,11 @@ function EstimateBuilder() {
     }
     if (lines.some((line) => !line.description.trim())) {
       toast.error("Every line needs a description.");
+      return;
+    }
+    const untaxed = lines.find((line) => line.tax_treatment !== "taxable" && !line.exempt_reason);
+    if (untaxed) {
+      toast.error(`${untaxed.description}: a reason is needed when a line is not taxed.`);
       return;
     }
     setSaving(true);
@@ -179,9 +208,8 @@ function EstimateBuilder() {
         >
           <ArrowLeft className="h-5 w-5" aria-hidden />
         </Link>
-        <h2 className="text-xl font-bold text-foreground">{estimateId ? "Edit estimate" : "New estimate"}</h2>
+        {/* Heading lives in the shell header (components/shell/page-header.tsx). */}
         <Badge tone="amber">Not a bill</Badge>
-        <p className="hidden text-sm text-muted-foreground sm:block">Nothing is sold and no stock moves until this becomes a bill.</p>
       </div>
 
       <Card className="p-4">
@@ -194,21 +222,25 @@ function EstimateBuilder() {
         />
       </Card>
 
-      <div className="grid gap-5 lg:grid-cols-[1.6fr_1fr] lg:items-start">
-        <div className="space-y-5">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)] lg:items-start">
+        {/* min-w-0: see invoices/create — keeps the lines table's overflow inside
+            the card instead of widening the page. */}
+        <div className="min-w-0 space-y-5">
           <Card className="p-4">
             <ItemSearch
               placeholder="Scan a tag or search an item to quote…"
-              onPick={(item, picked) =>
-                setLines((current) => [...current, lineFromStockItem(item, purities, defaultTaxRate, picked)])
-              }
+              categories={categories}
+              excludeIds={lines.map((l) => l.item_id).filter((id): id is number => id !== null)}
+              onPick={(item, picked) => onPickItem(lineFromStockItem(item, purities, defaultTaxRate, picked))}
             />
             <div className="mt-3 flex justify-end">
               <Button
                 variant="ghost"
                 size="sm"
                 type="button"
-                onClick={() => setLines((current) => [...current, blankLine(defaultTaxRate)])}
+                // a made-up line has no weights or rate yet, so it opens the
+                // step-by-step dialog rather than landing on the quote blank
+                onClick={() => setEditing({ line: blankLine(defaultTaxRate), isNew: true })}
               >
                 <Plus className="h-4 w-4" aria-hidden /> Quote something not in stock
               </Button>
@@ -217,8 +249,10 @@ function EstimateBuilder() {
               <LineItemsTable
                 lines={lines}
                 priceMode={priceMode}
-                canOverride={canOverride}
-                onChange={patchLine}
+                onEdit={(key) => {
+                  const line = lines.find((row) => row.key === key);
+                  if (line) setEditing({ line, isNew: false });
+                }}
                 onRemove={(key) => setLines((current) => current.filter((line) => line.key !== key))}
                 emptyState={
                   <EmptyState
@@ -257,7 +291,9 @@ function EstimateBuilder() {
             <TotalsPanel
               totals={totals}
               priceMode={priceMode}
-              onPriceModeChange={setPriceMode}
+              onPriceModeChange={(mode) => {
+                if (mode !== "without_gst") setPriceMode(mode);
+              }}
               discount={discount}
               onDiscountChange={setDiscount}
               grandLabel="Estimated Total"
@@ -278,6 +314,15 @@ function EstimateBuilder() {
           </Card>
         </div>
       </div>
+
+      <ItemDetailsDialog
+        line={editing?.line ?? null}
+        isNew={editing?.isNew ?? false}
+        priceMode={priceMode}
+        canOverride={canOverride}
+        onClose={() => setEditing(null)}
+        onSave={onSaveDetails}
+      />
     </div>
   );
 }

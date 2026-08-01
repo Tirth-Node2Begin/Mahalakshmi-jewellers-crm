@@ -3,12 +3,8 @@
 import { cn } from "@/shared/utils/cn";
 import { formatCurrency } from "@/shared/utils/format";
 import type { BillTotals } from "./calc";
-import type { PriceMode } from "./types";
+import type { BillTaxMode } from "./types";
 
-/**
- * The money column. Plain wording only — a counter hand should be able to read
- * this out to the customer without translating anything.
- */
 export function TotalsPanel({
   totals,
   priceMode,
@@ -17,34 +13,40 @@ export function TotalsPanel({
   onDiscountChange,
   grandLabel = "Grand Total",
   showRoundOff = true,
+  allowWithoutGst = false,
 }: {
   totals: BillTotals;
-  priceMode: PriceMode;
-  onPriceModeChange: (mode: PriceMode) => void;
+  priceMode: BillTaxMode;
+  onPriceModeChange: (mode: BillTaxMode) => void;
   discount: number;
   onDiscountChange: (value: number) => void;
   grandLabel?: string;
   showRoundOff?: boolean;
+  allowWithoutGst?: boolean;
 }) {
+  const withoutGst = priceMode === "without_gst";
+  const options: Array<{ mode: BillTaxMode; label: string }> = [
+    { mode: "exclusive", label: "GST extra" },
+    { mode: "inclusive", label: "GST included in price" },
+  ];
+
+  if (allowWithoutGst) {
+    options.push({ mode: "without_gst", label: "Without GST" });
+  }
+
   return (
     <div className="space-y-4">
-      {/* price mode — plain wording, not "exclusive / inclusive" */}
       <div>
         <p className="mb-2 text-xs font-medium uppercase tracking-[0.4px] text-muted-foreground">Price shown to the customer</p>
-        <div className="flex gap-1 rounded-pill bg-background p-1">
-          {(
-            [
-              { mode: "exclusive" as const, label: "GST extra" },
-              { mode: "inclusive" as const, label: "GST included in price" },
-            ]
-          ).map((option) => (
+        <div className={cn("grid gap-1 rounded-pill bg-background p-1", allowWithoutGst ? "grid-cols-3" : "grid-cols-2")}>
+          {options.map((option) => (
             <button
               key={option.mode}
               type="button"
               onClick={() => onPriceModeChange(option.mode)}
               aria-pressed={priceMode === option.mode}
               className={cn(
-                "flex-1 rounded-pill px-3 py-2 text-xs font-semibold transition-colors",
+                "min-h-10 rounded-pill px-3 py-2 text-xs font-semibold transition-colors",
                 priceMode === option.mode ? "bg-card text-primary-strong shadow-card" : "text-muted-foreground hover:text-foreground",
               )}
             >
@@ -72,12 +74,14 @@ export function TotalsPanel({
           />
         </div>
 
-        <Row label={priceMode === "inclusive" ? "GST (already in the price)" : "GST"} value={formatCurrency(totals.tax, true)} />
-        {totals.oldMetal > 0 ? (
-          <Row label="Old metal given" value={`− ${formatCurrency(totals.oldMetal, true)}`} tone="success" />
-        ) : null}
+        {!withoutGst ? (
+          <Row label={priceMode === "inclusive" ? "GST (already in the price)" : "GST"} value={formatCurrency(totals.tax, true)} />
+        ) : (
+          <p className="py-0.5 text-xs font-medium text-attention-strong">No GST on this bill</p>
+        )}
+        {totals.oldMetal > 0 ? <Row label="Old metal given" value={`- ${formatCurrency(totals.oldMetal, true)}`} tone="success" /> : null}
         {showRoundOff && Math.abs(totals.roundOff) >= 0.005 ? (
-          <Row label="Round off" value={`${totals.roundOff > 0 ? "+" : "−"} ${formatCurrency(Math.abs(totals.roundOff), true)}`} />
+          <Row label="Round off" value={`${totals.roundOff > 0 ? "+" : "-"} ${formatCurrency(Math.abs(totals.roundOff), true)}`} />
         ) : null}
       </div>
 

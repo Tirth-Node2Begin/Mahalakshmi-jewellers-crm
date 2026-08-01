@@ -6,12 +6,16 @@ namespace CRM\Customers;
 
 use CRM\Auth\AuthUser;
 use CRM\Database\Database;
+use CRM\Support\GstVisibility;
 use CRM\Support\ScopeSql;
 
 final class CustomerRepository
 {
     public static function list(AuthUser $user, array $filters): array
     {
+        $gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
+        $balanceSql = GstVisibility::invoiceBalanceSql('i', $gstVisibleOnly);
+        $invoiceVisibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::invoiceVisibleSql('i') : '';
         [$scopeSql, $params] = ScopeSql::owned($user, 'c');
         $conditions = [$scopeSql, 'c.is_active = 1'];
 
@@ -32,8 +36,8 @@ final class CustomerRepository
         $where = implode(' AND ', $conditions);
         return Database::fetchAll(
             "SELECT c.*, au.full_name AS assigned_to_name,
-                    (SELECT COALESCE(SUM(i.grand_total - i.paid_amount), 0) FROM invoices i
-                        WHERE i.customer_id = c.id AND i.status = 'final') AS outstanding
+                    (SELECT COALESCE(SUM({$balanceSql}), 0) FROM invoices i
+                        WHERE i.customer_id = c.id AND i.status = 'final'{$invoiceVisibilitySql}) AS outstanding
              FROM customers c
              LEFT JOIN users au ON au.id = c.assigned_to
              WHERE $where
@@ -56,6 +60,9 @@ final class CustomerRepository
 
     public static function stats(AuthUser $user): array
     {
+        $gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
+        $balanceSql = GstVisibility::invoiceBalanceSql('i', $gstVisibleOnly);
+        $invoiceVisibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::invoiceVisibleSql('i') : '';
         [$scopeSql, $params] = ScopeSql::owned($user, 'c');
         $row = Database::fetchOne(
             "SELECT COUNT(*) AS total,
@@ -68,9 +75,9 @@ final class CustomerRepository
         ) ?? [];
 
         $outstanding = Database::fetchValue(
-            "SELECT COALESCE(SUM(i.grand_total - i.paid_amount), 0)
+            "SELECT COALESCE(SUM({$balanceSql}), 0)
              FROM invoices i JOIN customers c ON c.id = i.customer_id
-             WHERE i.status = 'final' AND c.is_active = 1 AND $scopeSql",
+             WHERE i.status = 'final' AND c.is_active = 1 AND $scopeSql{$invoiceVisibilitySql}",
             $params
         );
 
@@ -97,11 +104,18 @@ final class CustomerRepository
         );
     }
 
-    public static function invoices(int $customerId): array
+    public static function invoices(int $customerId, bool $gstVisibleOnly = false): array
     {
+        $grandTotalSql = GstVisibility::invoiceAmountSql('i', $gstVisibleOnly);
+        $paidAmountSql = GstVisibility::invoicePaidSql('i', $gstVisibleOnly);
+        $visibilitySql = $gstVisibleOnly
+            ? ' AND (NOT EXISTS (SELECT 1 FROM invoice_items hidden_check WHERE hidden_check.invoice_id = i.id) OR ' . GstVisibility::invoiceVisibleSql('i') . ')'
+            : '';
         return Database::fetchAll(
-            'SELECT id, invoice_no, invoice_date, due_date, status, grand_total, paid_amount
-             FROM invoices WHERE customer_id = :id ORDER BY invoice_date DESC, id DESC LIMIT 50',
+            "SELECT i.id, i.invoice_no, i.invoice_date, i.due_date, i.status,
+                    {$grandTotalSql} AS grand_total,
+                    {$paidAmountSql} AS paid_amount
+             FROM invoices i WHERE i.customer_id = :id{$visibilitySql} ORDER BY i.invoice_date DESC, i.id DESC LIMIT 50",
             ['id' => $customerId]
         );
     }
@@ -124,12 +138,15 @@ final class CustomerRepository
         );
     }
 
-    public static function totals(int $customerId): array
+    public static function totals(int $customerId, bool $gstVisibleOnly = false): array
     {
+        $grandTotalSql = GstVisibility::invoiceAmountSql('i', $gstVisibleOnly);
+        $paidAmountSql = GstVisibility::invoicePaidSql('i', $gstVisibleOnly);
+        $visibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::invoiceVisibleSql('i') : '';
         $row = Database::fetchOne(
-            "SELECT COALESCE(SUM(grand_total),0) AS billed,
-                    COALESCE(SUM(paid_amount),0) AS paid
-             FROM invoices WHERE customer_id = :id AND status = 'final'",
+            "SELECT COALESCE(SUM({$grandTotalSql}),0) AS billed,
+                    COALESCE(SUM({$paidAmountSql}),0) AS paid
+             FROM invoices i WHERE i.customer_id = :id AND i.status = 'final'{$visibilitySql}",
             ['id' => $customerId]
         ) ?? [];
         $billed = (float) ($row['billed'] ?? 0);

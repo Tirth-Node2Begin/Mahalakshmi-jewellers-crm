@@ -4,6 +4,7 @@ import { api } from "@/shared/api/http-client";
 import { Button } from "@/shared/ui/button";
 import { Dialog } from "@/shared/ui/dialog";
 import { FieldError, Input, Label } from "@/shared/ui/input";
+import { PasswordInput } from "@/shared/ui/password-input";
 import { isValidEmail } from "@/shared/utils/validation";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -167,11 +168,11 @@ export function ForgotPasswordModal({ open, onClose }: { open: boolean; onClose:
         <div className="space-y-5">
           <div>
             <Label htmlFor="fp_pw" required>New password</Label>
-            <Input id="fp_pw" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            <PasswordInput id="fp_pw" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
           </div>
           <div>
             <Label htmlFor="fp_confirm" required>Confirm password</Label>
-            <Input id="fp_confirm" type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+            <PasswordInput id="fp_confirm" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
           </div>
         </div>
       ) : null}

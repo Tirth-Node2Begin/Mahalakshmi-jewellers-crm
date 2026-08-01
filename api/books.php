@@ -20,8 +20,10 @@ use CRM\Database\Database;
 use CRM\Jewellery\BillingRepository;
 use CRM\Jewellery\StockService;
 use CRM\Support\FiscalYear;
+use CRM\Support\GstVisibility;
 
-requireApiAuth();
+$user = requireApiAuth();
+$gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
 requireMethod('GET');
 
 $report = (string) ($_GET['report'] ?? '');
@@ -42,16 +44,16 @@ switch ($report) {
     case 'pnl':
         // the client's headline report
         requirePermission('reports.pnl');
-        Response::success(['pnl' => AccountingRepository::profitAndLoss($from, $to)]);
+        Response::success(['pnl' => AccountingRepository::profitAndLoss($from, $to, $gstVisibleOnly)]);
 
     case 'trial_balance':
         requirePermission('reports.accounting');
-        Response::success(['trial_balance' => AccountingRepository::trialBalance($from, $to)]);
+        Response::success(['trial_balance' => AccountingRepository::trialBalance($from, $to, $gstVisibleOnly)]);
 
     case 'daybook':
         requirePermission('reports.accounting');
         $date = (string) ($_GET['date'] ?? date('Y-m-d'));
-        Response::success(['date' => $date, 'vouchers' => AccountingRepository::dayBook($date)]);
+        Response::success(['date' => $date, 'vouchers' => AccountingRepository::dayBook($date, $gstVisibleOnly)]);
 
     case 'ledger':
         requirePermission('reports.accounting');
@@ -59,7 +61,14 @@ switch ($report) {
         if ($ledgerId <= 0) {
             Response::error('VALIDATION_ERROR', 'Choose a ledger.', 422);
         }
-        Response::success(['statement' => AccountingRepository::ledgerStatement($ledgerId, $from, $to)]);
+        Response::success([
+            'statement' => AccountingRepository::ledgerStatement(
+                $ledgerId,
+                $from,
+                $to,
+                $gstVisibleOnly
+            ),
+        ]);
 
     case 'cash_bank_book':
         requirePermission('reports.accounting');
@@ -71,14 +80,19 @@ switch ($report) {
         foreach ($ledgers as $ledger) {
             $books[] = [
                 'ledger' => $ledger,
-                'statement' => AccountingRepository::ledgerStatement((int) $ledger['id'], $from, $to),
+                'statement' => AccountingRepository::ledgerStatement(
+                    (int) $ledger['id'],
+                    $from,
+                    $to,
+                    $gstVisibleOnly
+                ),
             ];
         }
         Response::success(['books' => $books]);
 
     case 'customer_outstanding':
         requirePermission('reports.outstanding');
-        Response::success(['outstanding' => AccountingRepository::outstanding('customer', $to)]);
+        Response::success(['outstanding' => AccountingRepository::outstanding('customer', $to, $gstVisibleOnly)]);
 
     case 'vendor_outstanding':
         requirePermission('reports.outstanding');
@@ -86,15 +100,17 @@ switch ($report) {
 
     case 'gst_summary':
         requirePermission('reports.gst');
-        $gst = BillingRepository::gstSummary($from, $to);
+        $gst = BillingRepository::gstSummary($from, $to, $gstVisibleOnly);
         // Reconciliation: outward turnover must equal the P&L's SALES income.
         // Round-off is booked as other income, so it is excluded here — otherwise
         // every bill's paise adjustment shows up as a phantom mismatch.
-        $pnl = AccountingRepository::profitAndLoss($from, $to);
-        $salesIncome = 0.0;
-        foreach ($pnl['income'] as $line) {
-            if (($line['linked_type'] ?? null) !== 'round_off') {
-                $salesIncome += (float) $line['amount'];
+        $salesIncome = $gstVisibleOnly ? (float) $gst['total_turnover'] : 0.0;
+        if (!$gstVisibleOnly) {
+            $pnl = AccountingRepository::profitAndLoss($from, $to);
+            foreach ($pnl['income'] as $line) {
+                if (($line['linked_type'] ?? null) !== 'round_off') {
+                    $salesIncome += (float) $line['amount'];
+                }
             }
         }
         $salesIncome = round($salesIncome, 2);
@@ -105,12 +121,57 @@ switch ($report) {
         ];
         Response::success(['gst' => $gst]);
 
+    case 'ledger_view':
+        $view = strtolower((string) ($_GET['view'] ?? ''));
+        if ($view === '') {
+            $view = checkPermission('reports.accounting') ? 'full' : 'gst';
+        }
+        if ($gstVisibleOnly) {
+            $view = 'gst';
+        }
+        if (!in_array($view, ['full', 'gst'], true)) {
+            Response::error('VALIDATION_ERROR', 'Choose a valid ledger view.', 422);
+        }
+        if ($view === 'full') {
+            requirePermission('reports.accounting');
+        } else {
+            requirePermission('reports.gst');
+        }
+        Response::success(['ledger' => BillingRepository::ledgerView($from, $to, $view)]);
+
     case 'sales_register':
         requirePermission('reports.read');
-        Response::success(['rows' => BillingRepository::salesRegister($from, $to)]);
+        Response::success(['rows' => BillingRepository::salesRegister($from, $to, $gstVisibleOnly)]);
 
     case 'purchase_register':
         requirePermission('reports.read');
+        if ($gstVisibleOnly) {
+            Response::success([
+                'rows' => Database::fetchAll(
+                    "SELECT p.id, p.purchase_no, p.purchase_date, p.invoice_ref, s.name AS vendor_name,
+                            s.gstin AS vendor_gstin,
+                            SUM(pi.line_total - pi.tax_amount) AS subtotal,
+                            SUM(pi.tax_amount * COALESCE(p.cgst / NULLIF(p.tax_total, 0), 0)) AS cgst,
+                            SUM(pi.tax_amount * COALESCE(p.sgst / NULLIF(p.tax_total, 0), 0)) AS sgst,
+                            SUM(pi.tax_amount * COALESCE(p.igst / NULLIF(p.tax_total, 0), 0)) AS igst,
+                            SUM(pi.tax_amount) AS tax_total,
+                            SUM(pi.line_total) AS grand_total,
+                            CASE
+                                WHEN p.grand_total > 0 THEN p.paid_amount * (LEAST(SUM(pi.line_total), p.grand_total) / p.grand_total)
+                                ELSE 0
+                            END AS paid_amount
+                       FROM purchase_items pi
+                       JOIN purchases p ON p.id = pi.purchase_id
+                       JOIN suppliers s ON s.id = p.supplier_id
+                      WHERE p.status <> 'cancelled'
+                        AND p.purchase_date BETWEEN :from AND :to
+                        AND (pi.tax_rate > 0 OR pi.tax_amount > 0)
+                      GROUP BY p.id, p.purchase_no, p.purchase_date, p.invoice_ref, s.name, s.gstin, p.paid_amount
+                      ORDER BY p.purchase_date, p.id",
+                    ['from' => $from, 'to' => $to]
+                ),
+            ]);
+        }
         Response::success([
             'rows' => Database::fetchAll(
                 "SELECT p.id, p.purchase_no, p.purchase_date, p.invoice_ref, s.name AS vendor_name,
@@ -130,7 +191,7 @@ switch ($report) {
     case 'stock_movement':
         requirePermission('reports.stock');
         $params = ['from' => $from, 'to' => $to];
-        $sql = "SELECT t.id, t.created_at, t.type, t.reason, t.qty, t.weight, t.rate_per_gram, t.value,
+        $sql = "SELECT t.id, t.item_id, t.created_at, t.type, t.reason, t.qty, t.weight, t.rate_per_gram, t.value,
                        t.adjustment_reason, i.item_code, i.name AS item_name, i.metal,
                        p.code AS purity_code, inv.invoice_no, pur.purchase_no, u.full_name AS user_name
                   FROM inventory_transactions t
@@ -140,12 +201,24 @@ switch ($report) {
              LEFT JOIN purchases pur ON pur.id = t.purchase_id
              LEFT JOIN users u ON u.id = t.created_by
                  WHERE DATE(t.created_at) BETWEEN :from AND :to";
+        if ($gstVisibleOnly) {
+            $sql .= ' AND ' . GstVisibility::stockMovementVisibleSql('t');
+        }
         if (!empty($_GET['item_id'])) {
             $sql .= ' AND t.item_id = :item';
             $params['item'] = (int) $_GET['item_id'];
         }
         $sql .= ' ORDER BY t.created_at DESC, t.id DESC LIMIT 500';
-        Response::success(['movements' => Database::fetchAll($sql, $params)]);
+        $movements = Database::fetchAll($sql, $params);
+        if ($gstVisibleOnly) {
+            $movements = GstVisibility::projectHiddenSaleStockOut(
+                $movements,
+                $from,
+                $to,
+                !empty($_GET['item_id']) ? (int) $_GET['item_id'] : null
+            );
+        }
+        Response::success(['movements' => $movements]);
 
     case 'dead_stock':
         requirePermission('reports.stock');

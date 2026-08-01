@@ -48,7 +48,15 @@ export interface CoaResponse {
   ledgers: LedgerOption[];
 }
 
+/** The other side of the entry — where the money went to, or came from. */
+export interface ContraAccount {
+  name: string;
+  amount: number;
+  side: DrCr;
+}
+
 export interface StatementEntry {
+  entry_id: number;
   voucher_id: number;
   voucher_no: string;
   vdate: string;
@@ -56,6 +64,9 @@ export interface StatementEntry {
   ref_type: string | null;
   ref_id: number | null;
   narration: string | null;
+  /** contra accounts, already prefixed "To …" (debit) or "By …" (credit) */
+  particulars: string;
+  contra: ContraAccount[];
   dr_amount: string;
   cr_amount: string;
   /** running balance, always positive — read it with balance_type */
@@ -65,9 +76,13 @@ export interface StatementEntry {
 
 export interface LedgerStatement {
   ledger: { id: number; name: string; code: string | null; opening_balance: string; opening_type: DrCr; nature: Nature };
+  view?: "full" | "gst";
+  filtered_non_gst?: boolean;
   opening: number;
   opening_type: DrCr;
   entries: StatementEntry[];
+  total_debit: number;
+  total_credit: number;
   closing: number;
   closing_type: DrCr;
 }

@@ -7,6 +7,7 @@ namespace CRM\Reports;
 use CRM\Auth\AuthUser;
 use CRM\Auth\PermissionService;
 use CRM\Database\Database;
+use CRM\Support\GstVisibility;
 
 /**
  * Role-routed dashboard widget payload. One round trip per role.
@@ -38,10 +39,12 @@ final class DashboardRepository
     /** Resolve the caller's variant and return its payload. */
     public static function payload(AuthUser $user, int $months): array
     {
+        $gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
+
         return match (self::resolveVariant($user)) {
             'inventory' => self::inventoryPayload($months),
-            'sales'     => self::salesPayload($months, $user),
-            default     => self::executivePayload($months, $user),
+            'sales'     => self::salesPayload($months, $user, $gstVisibleOnly),
+            default     => self::executivePayload($months, $user, $gstVisibleOnly),
         };
     }
 
@@ -65,7 +68,7 @@ final class DashboardRepository
     // ==================================================================== executive
 
     /** super_admin / admin — the full business picture, each block gated by permission. */
-    public static function executivePayload(int $months, AuthUser $user): array
+    public static function executivePayload(int $months, AuthUser $user, bool $gstVisibleOnly = false): array
     {
         $can   = static fn (string $p): bool => PermissionService::can($user, $p);
         $inv   = $can('invoices.read');
@@ -76,26 +79,23 @@ final class DashboardRepository
         return [
             'variant' => 'executive',
             'alerts' => [
-                'overdue_invoices' => $inv ? self::countOverdueInvoices() : 0,
+                'overdue_invoices' => $inv ? self::countOverdueInvoices($gstVisibleOnly) : 0,
                 'low_stock'        => $stock ? self::countLowStock() : 0,
             ],
-            'kpis'               => self::executiveKpis($inv, $exp),
-            'cashflow'           => self::cashflow($months, $inv, $exp),
+            'kpis'               => self::executiveKpis($inv, $exp, $gstVisibleOnly),
+            'cashflow'           => self::cashflow($months, $inv, $exp, $gstVisibleOnly),
             'upcoming_occasions' => $cust ? self::upcomingOccasions() : [],
-            'recent_payments'    => $inv ? self::recentPayments() : [],
+            'recent_payments'    => $inv ? self::recentPayments($gstVisibleOnly) : [],
             'recent_expenses'    => $exp ? self::recentExpenses() : [],
             'low_stock'          => $stock ? self::lowStock() : [],
         ];
     }
 
-    private static function executiveKpis(bool $inv, bool $exp): array
+    private static function executiveKpis(bool $inv, bool $exp, bool $gstVisibleOnly = false): array
     {
         $monthStart = date('Y-m-01');
         $monthEnd   = date('Y-m-t');
-        $revenue = $inv ? (float) Database::fetchValue(
-            'SELECT COALESCE(SUM(amount),0) FROM invoice_payments WHERE payment_date BETWEEN :s AND :e AND ' . self::CLEARED,
-            ['s' => $monthStart, 'e' => $monthEnd]
-        ) : 0.0;
+        $revenue = $inv ? self::collectionsBetween($monthStart, $monthEnd, $gstVisibleOnly) : 0.0;
         $expenses = $exp ? (float) Database::fetchValue(
             'SELECT COALESCE(SUM(amount),0) FROM expenses WHERE expense_date BETWEEN :s AND :e',
             ['s' => $monthStart, 'e' => $monthEnd]
@@ -105,55 +105,53 @@ final class DashboardRepository
             'month_revenue'      => round($revenue, 2),
             'month_expenses'     => round($expenses, 2),
             'month_net'          => round($revenue - $expenses, 2),
-            'month_sales'        => $inv ? self::salesBetween($monthStart, $monthEnd) : 0.0,
-            'today_sales'        => $inv ? self::todaysSales() : 0.0,
-            'today_collections'  => $inv ? self::todaysCollections() : 0.0,
-            'outstanding'        => $inv ? self::outstanding() : 0.0,
+            'month_sales'        => $inv ? self::salesBetween($monthStart, $monthEnd, $gstVisibleOnly) : 0.0,
+            'today_sales'        => $inv ? self::todaysSales($gstVisibleOnly) : 0.0,
+            'today_collections'  => $inv ? self::todaysCollections($gstVisibleOnly) : 0.0,
+            'outstanding'        => $inv ? self::outstanding($gstVisibleOnly) : 0.0,
         ];
     }
 
     // ======================================================================== sales
 
     /** billing_officer — billing & collections. */
-    public static function salesPayload(int $months, AuthUser $user): array
+    public static function salesPayload(int $months, AuthUser $user, bool $gstVisibleOnly = false): array
     {
         return [
             'variant' => 'sales',
             'alerts' => [
-                'overdue_invoices' => self::countOverdueInvoices(),
+                'overdue_invoices' => self::countOverdueInvoices($gstVisibleOnly),
                 'low_stock'        => self::countLowStock(),
             ],
-            'kpis'               => self::salesKpis(),
-            'collections'        => self::collectionsSeries($months),
+            'kpis'               => self::salesKpis($gstVisibleOnly),
+            'collections'        => self::collectionsSeries($months, $gstVisibleOnly),
             'upcoming_occasions' => self::upcomingOccasions(),
-            'recent_payments'    => self::recentPayments(),
+            'recent_payments'    => self::recentPayments($gstVisibleOnly),
         ];
     }
 
-    private static function salesKpis(): array
+    private static function salesKpis(bool $gstVisibleOnly = false): array
     {
         $monthStart = date('Y-m-01');
         $monthEnd   = date('Y-m-t');
-        $collections = (float) Database::fetchValue(
-            'SELECT COALESCE(SUM(amount),0) FROM invoice_payments WHERE payment_date BETWEEN :s AND :e AND ' . self::CLEARED,
-            ['s' => $monthStart, 'e' => $monthEnd]
-        );
+        $collections = self::collectionsBetween($monthStart, $monthEnd, $gstVisibleOnly);
         return [
             'month_collections' => round($collections, 2),
-            'month_sales'       => self::salesBetween($monthStart, $monthEnd),
-            'today_sales'       => self::todaysSales(),
-            'today_collections' => self::todaysCollections(),
-            'outstanding'       => self::outstanding(),
-            'draft_invoices'    => (int) Database::fetchValue("SELECT COUNT(*) FROM invoices WHERE status = 'draft'"),
+            'month_sales'       => self::salesBetween($monthStart, $monthEnd, $gstVisibleOnly),
+            'today_sales'       => self::todaysSales($gstVisibleOnly),
+            'today_collections' => self::todaysCollections($gstVisibleOnly),
+            'outstanding'       => self::outstanding($gstVisibleOnly),
+            'draft_invoices'    => self::draftInvoices($gstVisibleOnly),
         ];
     }
 
     /** 12-month collected (payments in) series — no expense visibility for this role. */
-    private static function collectionsSeries(int $months): array
+    private static function collectionsSeries(int $months, bool $gstVisibleOnly = false): array
     {
         $months = max(1, min(24, $months));
+        $amountSql = self::paymentAmountSql('invoice_payments', $gstVisibleOnly);
         $income = self::monthlySeries(
-            "SELECT DATE_FORMAT(payment_date,'%Y-%m') m, SUM(amount) v FROM invoice_payments WHERE payment_date >= :start AND " . self::CLEARED . ' GROUP BY m',
+            "SELECT DATE_FORMAT(payment_date,'%Y-%m') m, SUM({$amountSql}) v FROM invoice_payments WHERE payment_date >= :start AND " . self::CLEARED . ' GROUP BY m',
             $months
         );
         $out = [];
@@ -259,10 +257,11 @@ final class DashboardRepository
     // =================================================================== shared bits
 
     /** 12-month income (payments) vs expense series. Either side can be suppressed by RBAC. */
-    public static function cashflow(int $months, bool $income = true, bool $expense = true): array
+    public static function cashflow(int $months, bool $income = true, bool $expense = true, bool $gstVisibleOnly = false): array
     {
         $months = max(1, min(24, $months));
-        $inc = $income ? self::monthlySeries("SELECT DATE_FORMAT(payment_date,'%Y-%m') m, SUM(amount) v FROM invoice_payments WHERE payment_date >= :start AND " . self::CLEARED . ' GROUP BY m', $months) : [];
+        $amountSql = self::paymentAmountSql('invoice_payments', $gstVisibleOnly);
+        $inc = $income ? self::monthlySeries("SELECT DATE_FORMAT(payment_date,'%Y-%m') m, SUM({$amountSql}) v FROM invoice_payments WHERE payment_date >= :start AND " . self::CLEARED . ' GROUP BY m', $months) : [];
         $exp = $expense ? self::monthlySeries("SELECT DATE_FORMAT(expense_date,'%Y-%m') m, SUM(amount) v FROM expenses WHERE expense_date >= :start GROUP BY m", $months) : [];
         $out = [];
         foreach (self::monthKeys($months) as $key) {
@@ -302,16 +301,19 @@ final class DashboardRepository
     }
 
     /** Walk-in bills have no customer row, so both joins are LEFT and the name falls back. */
-    private static function recentPayments(): array
+    private static function recentPayments(bool $gstVisibleOnly = false): array
     {
+        $amountSql = self::paymentAmountSql('p', $gstVisibleOnly);
+        $visibilitySql = $gstVisibleOnly ? ' AND ' . self::paymentVisibleSql('p') : '';
+
         return Database::fetchAll(
-            "SELECT p.id, p.amount, p.payment_date, p.payment_mode, i.invoice_no,
+            "SELECT p.id, ROUND({$amountSql}, 2) AS amount, p.payment_date, p.payment_mode, i.invoice_no,
                     COALESCE(c.name, ic.name, i.walkin_name, 'Walk-in') AS customer_name
              FROM invoice_payments p
              LEFT JOIN invoices i ON i.id = p.invoice_id
              LEFT JOIN customers c ON c.id = p.customer_id
              LEFT JOIN customers ic ON ic.id = i.customer_id
-             WHERE " . self::CLEARED_P . ' ORDER BY p.id DESC LIMIT 6'
+             WHERE " . self::CLEARED_P . "{$visibilitySql} ORDER BY p.id DESC LIMIT 6"
         );
     }
 
@@ -336,42 +338,76 @@ final class DashboardRepository
     // -------------------------------------------------------------- money helpers
 
     /** Billed value of finalised invoices in a window (drafts/cancelled excluded). */
-    private static function salesBetween(string $from, string $to): float
+    private static function salesBetween(string $from, string $to, bool $gstVisibleOnly = false): float
     {
+        $amountSql = self::invoiceAmountSql('invoices', $gstVisibleOnly);
+
         return round((float) Database::fetchValue(
-            "SELECT COALESCE(SUM(grand_total),0) FROM invoices WHERE status = 'final' AND invoice_date BETWEEN :s AND :e",
+            "SELECT COALESCE(SUM({$amountSql}),0) FROM invoices WHERE status = 'final' AND invoice_date BETWEEN :s AND :e",
             ['s' => $from, 'e' => $to]
         ), 2);
     }
 
-    private static function todaysSales(): float
+    private static function todaysSales(bool $gstVisibleOnly = false): float
     {
         return round((float) Database::fetchValue(
-            "SELECT COALESCE(SUM(grand_total),0) FROM invoices WHERE status = 'final' AND invoice_date = CURDATE()"
+            "SELECT COALESCE(SUM(" . self::invoiceAmountSql('invoices', $gstVisibleOnly) . "),0) FROM invoices WHERE status = 'final' AND invoice_date = CURDATE()"
         ), 2);
     }
 
-    private static function todaysCollections(): float
+    private static function todaysCollections(bool $gstVisibleOnly = false): float
     {
         return round((float) Database::fetchValue(
-            'SELECT COALESCE(SUM(amount),0) FROM invoice_payments WHERE payment_date = CURDATE() AND ' . self::CLEARED
+            'SELECT COALESCE(SUM(' . self::paymentAmountSql('invoice_payments', $gstVisibleOnly) . '),0) FROM invoice_payments WHERE payment_date = CURDATE() AND ' . self::CLEARED
         ), 2);
     }
 
-    private static function outstanding(): float
+    private static function collectionsBetween(string $from, string $to, bool $gstVisibleOnly = false): float
     {
         return round((float) Database::fetchValue(
-            'SELECT COALESCE(SUM(grand_total - paid_amount),0) FROM invoices WHERE ' . self::UNSETTLED
+            'SELECT COALESCE(SUM(' . self::paymentAmountSql('invoice_payments', $gstVisibleOnly) . '),0) FROM invoice_payments WHERE payment_date BETWEEN :s AND :e AND ' . self::CLEARED,
+            ['s' => $from, 'e' => $to]
+        ), 2);
+    }
+
+    private static function outstanding(bool $gstVisibleOnly = false): float
+    {
+        if (!$gstVisibleOnly) {
+            return round((float) Database::fetchValue(
+                'SELECT COALESCE(SUM(grand_total - paid_amount),0) FROM invoices WHERE ' . self::UNSETTLED
+            ), 2);
+        }
+
+        $outstandingSql = self::invoiceOutstandingSql('invoices');
+        return round((float) Database::fetchValue(
+            "SELECT COALESCE(SUM({$outstandingSql}),0) FROM invoices WHERE status = 'final' AND {$outstandingSql} > 0.01"
         ), 2);
     }
 
     // -------------------------------------------------------------- count helpers
 
-    private static function countOverdueInvoices(): int
+    private static function countOverdueInvoices(bool $gstVisibleOnly = false): int
     {
+        if ($gstVisibleOnly) {
+            $outstandingSql = self::invoiceOutstandingSql('invoices');
+            return (int) Database::fetchValue(
+                "SELECT COUNT(*) FROM invoices WHERE status = 'final' AND due_date IS NOT NULL AND due_date < CURDATE() AND {$outstandingSql} > 0.01"
+            );
+        }
+
         return (int) Database::fetchValue(
             'SELECT COUNT(*) FROM invoices WHERE ' . self::UNSETTLED . ' AND due_date IS NOT NULL AND due_date < CURDATE()'
         );
+    }
+
+    private static function draftInvoices(bool $gstVisibleOnly = false): int
+    {
+        $visibilitySql = $gstVisibleOnly
+            ? ' AND (NOT EXISTS (SELECT 1 FROM invoice_items hidden_check WHERE hidden_check.invoice_id = invoices.id)
+                    OR ' . self::invoiceVisibleTotalSql('invoices') . ' > 0)'
+            : '';
+
+        return (int) Database::fetchValue("SELECT COUNT(*) FROM invoices WHERE status = 'draft'{$visibilitySql}");
     }
 
     private static function countLowStock(): int
@@ -411,5 +447,69 @@ final class DashboardRepository
             $keys[] = date('Y-m', strtotime("-$i months"));
         }
         return $keys;
+    }
+
+    private static function invoiceVisibleTotalSql(string $invoiceAlias): string
+    {
+        return "COALESCE((
+            SELECT SUM(visible_line.line_total)
+             FROM invoice_items visible_line
+             WHERE visible_line.invoice_id = {$invoiceAlias}.id
+               AND visible_line.tax_treatment = 'taxable'
+        ), 0)";
+    }
+
+    private static function invoiceAmountSql(string $invoiceAlias, bool $gstVisibleOnly): string
+    {
+        return $gstVisibleOnly
+            ? "LEAST(" . self::invoiceVisibleTotalSql($invoiceAlias) . ", {$invoiceAlias}.grand_total)"
+            : "{$invoiceAlias}.grand_total";
+    }
+
+    private static function invoiceOutstandingSql(string $invoiceAlias): string
+    {
+        $visibleTotal = "LEAST(" . self::invoiceVisibleTotalSql($invoiceAlias) . ", {$invoiceAlias}.grand_total)";
+        return "GREATEST(
+            CASE
+                WHEN {$invoiceAlias}.grand_total > 0
+                THEN ({$invoiceAlias}.grand_total - {$invoiceAlias}.paid_amount) * ({$visibleTotal} / {$invoiceAlias}.grand_total)
+                ELSE 0
+            END,
+            0
+        )";
+    }
+
+    private static function paymentAmountSql(string $paymentAlias, bool $gstVisibleOnly): string
+    {
+        if (!$gstVisibleOnly) {
+            return "{$paymentAlias}.amount";
+        }
+
+        return "CASE
+            WHEN {$paymentAlias}.invoice_id IS NULL THEN {$paymentAlias}.amount
+            ELSE {$paymentAlias}.amount * COALESCE(LEAST((
+                SELECT SUM(visible_line.line_total)
+                 FROM invoice_items visible_line
+                 WHERE visible_line.invoice_id = {$paymentAlias}.invoice_id
+                   AND visible_line.tax_treatment = 'taxable'
+            ) / NULLIF((
+                SELECT paid_invoice.grand_total
+                  FROM invoices paid_invoice
+                 WHERE paid_invoice.id = {$paymentAlias}.invoice_id
+            ), 0), 1), 0)
+        END";
+    }
+
+    private static function paymentVisibleSql(string $paymentAlias): string
+    {
+        return "(
+            {$paymentAlias}.invoice_id IS NULL
+            OR COALESCE((
+                SELECT SUM(visible_line.line_total)
+                 FROM invoice_items visible_line
+                 WHERE visible_line.invoice_id = {$paymentAlias}.invoice_id
+                   AND visible_line.tax_treatment = 'taxable'
+            ), 0) > 0
+        )";
     }
 }

@@ -12,7 +12,12 @@ import { api } from "@/shared/api/http-client";
  * optional and use `canSeeCost()` before showing a money column.
  */
 
-export type Metal = "gold" | "silver";
+/**
+ * A metal CODE, not a fixed union — the shop can add metals from the app
+ * (api/metals.php), so anything here may be a code this build has never seen.
+ * Always render one through `metalLabel()`, never `METAL_LABEL[code]`.
+ */
+export type Metal = string;
 export type Tracking = "tagged" | "bulk";
 export type ItemStatus = "in_stock" | "sold" | "removed";
 export type MakingType = "per_gram" | "fixed" | "percent";
@@ -136,6 +141,7 @@ export interface AdjustPayload {
   direction: "in" | "out";
   qty?: number;
   weight: number;
+  rate_per_gram?: number;
   reason: string;
 }
 
@@ -147,6 +153,8 @@ export const stockApi = {
   saveItem: (payload: SaveItemPayload) =>
     api.post<{ id: number; message: string }>("stock.php", { action: "save_item", ...payload }),
   adjust: (payload: AdjustPayload) => api.post<{ message: string }>("stock.php", { action: "adjust", ...payload }),
+  /** Refused (409) once the item has any stock/purchase/billing history. */
+  deleteItem: (id: number) => api.post<{ message: string }>("stock.php", { action: "delete_item", id }),
   opening: (payload: { item_id: number; qty?: number; weight: number; value: number }) =>
     api.post<{ message: string }>("stock.php", { action: "opening", ...payload }),
 
@@ -155,7 +163,45 @@ export const stockApi = {
     api.get<{ movements: RegisterMovement[] }>("books.php", { report: "stock_movement", ...params }),
 };
 
-export const METAL_LABEL: Record<Metal, string> = { gold: "Gold", silver: "Silver" };
+/** One row of the metal master. */
+export interface MetalOption {
+  id: number;
+  code: Metal;
+  name: string;
+  sort_order: number;
+}
+
+export interface NewMetalPayload {
+  name: string;
+  code?: string;
+  /** a metal cannot be priced without a purity, so the first one is created with it */
+  purity_code: string;
+  purity_label?: string;
+  fineness: number;
+}
+
+export const metalsApi = {
+  list: () => api.get<{ metals: MetalOption[] }>("metals.php"),
+  create: (payload: NewMetalPayload) =>
+    api.post<{ metal: MetalOption; message: string }>("metals.php", { action: "create", ...payload }),
+};
+
+/** What ships with the system — used before the metal list has loaded. */
+export const METAL_LABEL: Record<string, string> = { gold: "Gold", silver: "Silver", platinum: "Platinum" };
+
+/**
+ * Display name for a stored metal code. Pass the loaded master where you have it;
+ * without it a metal the shop added still reads sensibly ("white_gold" → "White gold")
+ * instead of coming out blank.
+ */
+export function metalLabel(code: string | null | undefined, metals?: MetalOption[]): string {
+  if (!code) return "—";
+  const known = metals?.find((m) => m.code === code);
+  if (known) return known.name;
+  if (METAL_LABEL[code]) return METAL_LABEL[code];
+  const words = code.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
 
 export const TRACKING_LABEL: Record<Tracking, string> = {
   tagged: "Tagged piece",

@@ -8,6 +8,7 @@ import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Card, CardHeader } from "@/shared/ui/card";
 import { FieldError, Input, Label } from "@/shared/ui/input";
+import { PasswordInput } from "@/shared/ui/password-input";
 import { SkeletonCard } from "@/shared/ui/skeleton";
 import { formatDateTime, relativeTime } from "@/shared/utils/format";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -188,18 +189,18 @@ export default function ProfilePage() {
           <form onSubmit={changePassword} className="space-y-5" noValidate>
             <div>
               <Label htmlFor="current_password" required>Current password</Label>
-              <Input id="current_password" type="password" autoComplete="current-password" {...passwordForm.register("current_password")} aria-invalid={!!passwordForm.formState.errors.current_password} />
+              <PasswordInput id="current_password"  autoComplete="current-password" {...passwordForm.register("current_password")} aria-invalid={!!passwordForm.formState.errors.current_password} />
               <FieldError message={passwordForm.formState.errors.current_password?.message} />
             </div>
             <div className="grid gap-5 sm:grid-cols-2">
               <div>
                 <Label htmlFor="new_password" required>New password</Label>
-                <Input id="new_password" type="password" autoComplete="new-password" {...passwordForm.register("password")} aria-invalid={!!passwordForm.formState.errors.password} />
+                <PasswordInput id="new_password"  autoComplete="new-password" {...passwordForm.register("password")} aria-invalid={!!passwordForm.formState.errors.password} />
                 <FieldError message={passwordForm.formState.errors.password?.message} />
               </div>
               <div>
                 <Label htmlFor="confirm" required>Confirm</Label>
-                <Input id="confirm" type="password" autoComplete="new-password" {...passwordForm.register("confirm")} aria-invalid={!!passwordForm.formState.errors.confirm} />
+                <PasswordInput id="confirm"  autoComplete="new-password" {...passwordForm.register("confirm")} aria-invalid={!!passwordForm.formState.errors.confirm} />
                 <FieldError message={passwordForm.formState.errors.confirm?.message} />
               </div>
             </div>

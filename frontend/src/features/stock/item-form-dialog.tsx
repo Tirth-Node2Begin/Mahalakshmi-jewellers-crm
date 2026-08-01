@@ -2,7 +2,6 @@
 
 import {
   MAKING_TYPE_LABEL,
-  METAL_LABEL,
   stockApi,
   TRACKING_LABEL,
   type MakingType,
@@ -12,6 +11,7 @@ import {
   type StockItem,
   type Tracking,
 } from "@/features/stock/api";
+import { MetalSelect } from "@/features/stock/metal-select";
 import { ApiError } from "@/shared/api/api-error";
 import { Button } from "@/shared/ui/button";
 import { Collapsible } from "@/shared/ui/collapsible";
@@ -49,12 +49,15 @@ const BLANK = {
 export function ItemFormDialog({
   open,
   onClose,
+  onSaved,
   item,
   purities,
   categories,
 }: {
   open: boolean;
   onClose: () => void;
+  /** Fires after the server accepted the save, so the list can go to the item. */
+  onSaved?: (saved: { id: number; isNew: boolean }) => void;
   item?: StockItem | null;
   purities: Purity[];
   categories: StockCategory[];
@@ -126,7 +129,7 @@ export function ItemFormDialog({
 
     setBusy(true);
     try {
-      await stockApi.saveItem({
+      const saved = await stockApi.saveItem({
         ...(isEdit ? { id: item!.id } : {}),
         name: form.name.trim(),
         metal: form.metal,
@@ -143,6 +146,7 @@ export function ItemFormDialog({
       });
       toast.success(isEdit ? "Item saved." : "Item created.");
       void queryClient.invalidateQueries({ queryKey: ["stock"] });
+      onSaved?.({ id: saved.id, isNew: !isEdit });
       onClose();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not save the item. Please try again.");
@@ -187,20 +191,11 @@ export function ItemFormDialog({
             <Label htmlFor="itf_metal" required>
               Metal
             </Label>
-            <Select
+            <MetalSelect
               id="itf_metal"
               value={form.metal}
-              onChange={(e) => {
-                const metal = e.target.value as Metal;
-                setForm((f) => ({ ...f, metal, purity_id: "" }));
-              }}
-            >
-              {(Object.keys(METAL_LABEL) as Metal[]).map((m) => (
-                <option key={m} value={m}>
-                  {METAL_LABEL[m]}
-                </option>
-              ))}
-            </Select>
+              onChange={(metal) => setForm((f) => ({ ...f, metal, purity_id: "" }))}
+            />
           </div>
           <div>
             <Label htmlFor="itf_purity" required>

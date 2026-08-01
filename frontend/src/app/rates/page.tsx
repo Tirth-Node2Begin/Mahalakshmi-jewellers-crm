@@ -1,6 +1,8 @@
 "use client";
 
-import { METAL_LABEL, purityKey, ratesApi, type Metal, type Purity } from "@/features/rates/api";
+import { purityKey, ratesApi, type Metal, type Purity } from "@/features/rates/api";
+import { metalLabel } from "@/features/stock/api";
+import { useMetals } from "@/features/stock/metal-select";
 import { usePermissions } from "@/lib/permissions";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
@@ -14,8 +16,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Check, TrendingUp } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-
-const METAL_ORDER: Metal[] = ["gold", "silver"];
 
 export default function RatesPage() {
   const { can } = usePermissions();
@@ -32,6 +32,7 @@ export default function RatesPage() {
     queryKey: ["rates", date],
     queryFn: () => ratesApi.get(date),
   });
+  const { data: metalsData } = useMetals();
 
   useEffect(() => {
     if (!data || hydratedFor.current === data.date) return;
@@ -70,6 +71,8 @@ export default function RatesPage() {
     onError: (e) => toast.error(e instanceof Error ? e.message : "Could not save the rates. Please try again."),
   });
 
+  // Grouped by metal, in the order of the metal master — so a metal the shop adds
+  // shows up here to have its rate entered instead of being silently dropped.
   const groups = useMemo(() => {
     const byMetal = new Map<Metal, Purity[]>();
     for (const p of data?.purities ?? []) {
@@ -77,19 +80,24 @@ export default function RatesPage() {
       list.push(p);
       byMetal.set(p.metal, list);
     }
-    return METAL_ORDER.filter((m) => byMetal.has(m)).map((m) => ({ metal: m, purities: byMetal.get(m)! }));
-  }, [data]);
+    const ordered = (metalsData?.metals ?? []).map((m) => m.code).filter((m) => byMetal.has(m));
+    const rest = [...byMetal.keys()].filter((m) => !ordered.includes(m));
+    return [...ordered, ...rest].map((m) => ({ metal: m, purities: byMetal.get(m)! }));
+  }, [data, metalsData]);
 
   const isToday = date === localDateString();
   const anyFilled = Object.values(values).some((v) => v.trim() !== "" && Number(v) > 0);
 
+  // name what is actually missing — "rates are not set" next to cards saying
+  // "set" (because only platinum was blank) reads like a contradiction
+  const missing = data?.purities.filter((p) => !p.rate_per_gram) ?? [];
+  const missingNames = missing.map((p) => `${metalLabel(p.metal, metalsData?.metals)} ${p.code}`).join(", ");
+  const allMissing = missing.length > 0 && missing.length === (data?.purities.length ?? 0);
+
   return (
     <div className="space-y-6">
+      {/* Heading lives in the shell header (components/shell/page-header.tsx). */}
       <div className="flex flex-wrap items-center gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Today&rsquo;s Rates</h1>
-          <p className="text-sm text-muted-foreground">Rate per gram used for new bills.</p>
-        </div>
         <div className="ml-auto flex items-center gap-2">
           <Label htmlFor="rate-date" className="mb-0">
             For
@@ -112,9 +120,13 @@ export default function RatesPage() {
         <div className="flex items-start gap-3 rounded-card border border-warning-strong/30 bg-warning-soft p-4">
           <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-warning-strong" aria-hidden />
           <p className="text-sm font-medium text-warning-strong">
-            {isToday
-              ? "Today's rates are not set yet — billing needs them."
-              : `Rates for ${formatDate(date)} are not set — bills made on that day had no rate.`}
+            {allMissing
+              ? isToday
+                ? "Today's rates are not set yet — billing needs them."
+                : `Rates for ${formatDate(date)} are not set — bills made on that day had no rate.`
+              : isToday
+                ? `Still missing today: ${missingNames}. The other rates are set.`
+                : `Missing for ${formatDate(date)}: ${missingNames}. The other rates are set.`}
           </p>
         </div>
       ) : null}
@@ -141,7 +153,7 @@ export default function RatesPage() {
           {groups.map(({ metal, purities }) => (
             <section key={metal} className="space-y-3">
               <h2 className="text-sm font-semibold uppercase tracking-[0.4px] text-muted-foreground">
-                {METAL_LABEL[metal]}
+                {metalLabel(metal, metalsData?.metals)}
               </h2>
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {purities.map((p) => {
@@ -229,6 +241,8 @@ function RateHistory({
   history: { rate_date: string; metal: Metal; code: string; rate_per_gram: string }[];
   isLoading: boolean;
 }) {
+  const { data: metalsData } = useMetals();
+
   // pivot: one row per day, one column per purity
   const rows = useMemo(() => {
     const byDate = new Map<string, Record<string, string>>();
@@ -258,7 +272,7 @@ function RateHistory({
                 <th className="px-4 py-3 font-medium">Day</th>
                 {purities.map((p) => (
                   <th key={p.id} className="px-4 py-3 text-right font-medium">
-                    {METAL_LABEL[p.metal]} {p.code}
+                    {metalLabel(p.metal, metalsData?.metals)} {p.code}
                   </th>
                 ))}
               </tr>

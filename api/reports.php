@@ -7,8 +7,10 @@ require_once dirname(__DIR__) . '/src/Support/api_bootstrap.php';
 use CRM\Core\Response;
 use CRM\Reports\ReportsRepository;
 use CRM\Support\FiscalYear;
+use CRM\Support\GstVisibility;
 
-requireApiAuth();
+$user = requireApiAuth();
+$gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
 requireMethod('GET');
 requirePermission('reports.read');
 
@@ -52,11 +54,11 @@ $from = $fromTs !== false ? date('Y-m-d', $fromTs) : $fy['start'];
 $to = $toTs !== false ? date('Y-m-d', $toTs) : $fy['end'];
 
 $data = match ($tab) {
-    'revenue' => ReportsRepository::revenue($from, $to),
-    'expenses' => ReportsRepository::expenses($from, $to),
+    'revenue' => ReportsRepository::revenue($from, $to, $gstVisibleOnly),
+    'expenses' => ReportsRepository::expenses($from, $to, $gstVisibleOnly),
     // revenue on the customers tab is invoice money — only include it if the user can read invoices
-    'customers' => ReportsRepository::customers($from, $to, checkPermission('invoices.read')),
-    'inventory' => ReportsRepository::inventory($from, $to),
+    'customers' => ReportsRepository::customers($from, $to, checkPermission('invoices.read'), $gstVisibleOnly),
+    'inventory' => ReportsRepository::inventory($from, $to, $gstVisibleOnly),
 };
 
 // CSV export (planning/14 §3): same query, streamed as text/csv. Sections become

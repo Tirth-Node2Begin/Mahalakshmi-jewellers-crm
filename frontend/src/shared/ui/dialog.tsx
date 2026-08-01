@@ -7,6 +7,16 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 /**
+ * How many dialogs currently hold the scroll lock.
+ *
+ * Dialogs nest — the bill wizard opens the item-details dialog over itself — and
+ * the inner one closing must NOT hand scrolling back to the page while the outer
+ * one is still up. Counting holders instead of setting/clearing a flag keeps the
+ * lock until the last dialog goes.
+ */
+let scrollLocks = 0;
+
+/**
  * Modal per style.md §6 — elevation 3, 24px radius, backdrop blur,
  * scale 0.96→1 enter, ESC/backdrop close, focus containment.
  */
@@ -41,9 +51,11 @@ export function Dialog({
         ?.querySelector<HTMLElement>('input, select, textarea, button:not([aria-label="Close"])')
         ?.focus();
     });
+    scrollLocks += 1;
     document.body.style.overflow = "hidden";
     return () => {
-      document.body.style.overflow = "";
+      scrollLocks = Math.max(0, scrollLocks - 1);
+      if (scrollLocks === 0) document.body.style.overflow = "";
       previouslyFocused?.focus();
     };
   }, [open]);

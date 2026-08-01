@@ -59,11 +59,7 @@ export default function AuditLogPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-foreground">Audit Log</h1>
-        <p className="text-sm text-muted-foreground">Everything staff changed, and when.</p>
-      </div>
-
+      {/* Heading lives in the shell header (components/shell/page-header.tsx). */}
       <Card className="p-0">
         <div className="flex flex-wrap items-center gap-3 border-b border-border p-4">
           <Input

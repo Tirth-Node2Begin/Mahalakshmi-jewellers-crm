@@ -46,11 +46,7 @@ export default function EstimatesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-xl font-bold text-foreground">Estimates</h2>
-        <p className="text-sm text-muted-foreground">A price slip for the customer — nothing is sold until it becomes a bill.</p>
-      </div>
-
+      {/* Heading lives in the shell header (components/shell/page-header.tsx). */}
       <Card className="p-0">
         <div className="flex flex-wrap items-center gap-3 border-b border-border p-4">
           <div className="flex flex-wrap gap-1">

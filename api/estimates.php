@@ -11,17 +11,20 @@ require_once dirname(__DIR__) . '/src/Support/api_bootstrap.php';
 
 use CRM\Core\Request;
 use CRM\Core\Response;
+use CRM\Jewellery\BillingRepository;
 use CRM\Jewellery\EstimateService;
 use CRM\Jewellery\RateService;
+use CRM\Support\GstVisibility;
 use CRM\Validation\Validator;
 
 $user = requireApiAuth();
+$gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
 
 if (Request::method() === 'GET') {
     requirePermission('estimates.read');
 
     if (($_GET['view'] ?? '') === 'detail') {
-        $estimate = EstimateService::detail((int) ($_GET['id'] ?? 0));
+        $estimate = EstimateService::detail((int) ($_GET['id'] ?? 0), $gstVisibleOnly);
         if ($estimate === null) {
             Response::error('NOT_FOUND', 'Estimate not found.', 404);
         }
@@ -32,8 +35,9 @@ if (Request::method() === 'GET') {
         'estimates' => EstimateService::list([
             'status' => $_GET['status'] ?? null,
             'search' => $_GET['search'] ?? null,
-        ]),
+        ], $gstVisibleOnly),
         'purities' => RateService::purities(),
+        'categories' => BillingRepository::saleCategories(),
     ]);
 }
 
@@ -66,7 +70,7 @@ switch ($action) {
         );
         Response::success([
             'id' => $id,
-            'estimate' => EstimateService::detail($id),
+            'estimate' => EstimateService::detail($id, $gstVisibleOnly),
             'message' => 'Estimate saved.',
         ]);
 

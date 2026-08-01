@@ -20,12 +20,52 @@ final class VendorService
     public const MAKER_TYPES = ['karigar', 'manufacturer'];
     public const STATUSES = ['active', 'inactive', 'blacklisted'];
 
+    /**
+     * Shop-added types from the vendor_types master (2026_08_01 migration) —
+     * the built-ins above stay in code because the category tabs and the maker
+     * picklist depend on them.
+     *
+     * @return list<array{id:int,slug:string,label:string}>
+     */
+    public static function customTypes(): array
+    {
+        return array_map(
+            static fn (array $r): array => ['id' => (int) $r['id'], 'slug' => (string) $r['slug'], 'label' => (string) $r['label']],
+            Database::fetchAll('SELECT id, slug, label FROM vendor_types ORDER BY label')
+        );
+    }
+
+    /**
+     * Adds a custom vendor type. The slug (what suppliers.vendor_type stores) is
+     * derived from the label the same way Metals::create() derives a code.
+     *
+     * @return array{id:int,slug:string,label:string}
+     */
+    public static function addType(array $body, AuthUser $user): array
+    {
+        $data = Validator::validate($body, ['label' => 'required|string|min:2|max:60']);
+        $label = (string) $data['label'];
+        $slug = substr(trim(preg_replace('/[^a-z0-9]+/', '_', strtolower($label)) ?? '', '_'), 0, 30);
+        if ($slug === '') {
+            throw new \DomainException('The type name needs at least one letter or number.');
+        }
+        $exists = in_array($slug, self::TYPES, true)
+            || Database::fetchOne('SELECT id FROM vendor_types WHERE slug = :s OR label = :l', ['s' => $slug, 'l' => $label]) !== null;
+        if ($exists) {
+            throw new \DomainException('That type already exists — pick it from the list.');
+        }
+        $id = Database::insert('vendor_types', ['slug' => $slug, 'label' => $label, 'created_by' => $user->id]);
+        return ['id' => $id, 'slug' => $slug, 'label' => $label];
+    }
+
     public static function save(array $body, AuthUser $user): int
     {
+        // built-in + shop-added types; slugs are a-z0-9_ only, so safe in an in: rule
+        $types = array_merge(self::TYPES, array_column(self::customTypes(), 'slug'));
         $data = Validator::validate($body, [
             'id' => 'nullable|int|min:1',
             'name' => 'required|string|min:2|max:150',
-            'vendor_type' => 'required|in:' . implode(',', self::TYPES),
+            'vendor_type' => 'required|in:' . implode(',', $types),
             'company' => 'nullable|string|max:150',
             'contact_person' => 'nullable|string|max:120',
             'gstin' => 'nullable|string|max:20',

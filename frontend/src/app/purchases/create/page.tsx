@@ -10,7 +10,8 @@ import {
   type PurchaseLinePayload,
 } from "@/features/purchases/api";
 import { printItemTags, type TagToPrint } from "@/features/purchases/print-tags";
-import { METAL_LABEL, type Metal } from "@/features/stock/api";
+import { type Metal, type StockCategory } from "@/features/stock/api";
+import { MetalSelect } from "@/features/stock/metal-select";
 import { vendorPaymentsApi } from "@/features/vendors/payments-api";
 import { usePermissions } from "@/lib/permissions";
 import { ApiError } from "@/shared/api/api-error";
@@ -25,9 +26,9 @@ import { Textarea } from "@/shared/ui/textarea";
 import { cn } from "@/shared/utils/cn";
 import { formatCurrency, formatWeight, localDateString } from "@/shared/utils/format";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Lock, Plus, Printer, Trash2 } from "lucide-react";
+import { ChevronDown, Lock, Plus, Printer, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 interface LineDraft {
@@ -70,6 +71,74 @@ function blankLine(kind: LineKind = "tagged"): LineDraft {
     amount: "",
     tax_rate: "3",
   };
+}
+
+const COMMON_PIECE_NAMES = [
+  "Kada - plain",
+  "Kada - design",
+  "Ring - plain",
+  "Ring - CZ",
+  "Bangle - single",
+  "Bangle Set",
+  "Bracelet",
+  "Chain",
+  "Chain with pendant",
+  "Pendant",
+  "Pendant Set",
+  "Earring",
+  "Necklace",
+  "Choker Necklace",
+  "Mangalsutra",
+  "Nose Pin",
+  "Anklet",
+  "Toe Ring",
+  "Coin",
+  "Bar",
+];
+
+const METAL_LABELS: Record<string, string> = {
+  gold: "Gold",
+  silver: "Silver",
+  platinum: "Platinum",
+};
+
+function metalName(metal: Metal): string {
+  const key = String(metal || "").toLowerCase();
+  return METAL_LABELS[key] ?? (key ? key.charAt(0).toUpperCase() + key.slice(1) : "Gold");
+}
+
+function uniqueNames(names: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const name of names) {
+    const clean = name.trim().replace(/\s+/g, " ");
+    const key = clean.toLowerCase();
+    if (clean && !seen.has(key)) {
+      seen.add(key);
+      out.push(clean);
+    }
+  }
+  return out;
+}
+
+function pieceNameOptions(categories: StockCategory[], metal: Metal): string[] {
+  const label = metalName(metal);
+  return uniqueNames([
+    ...categories.map((c) => `${label} ${c.name}`),
+    ...COMMON_PIECE_NAMES.map((name) => `${label} ${name}`),
+  ]);
+}
+
+function tokens(value: string): string[] {
+  return value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+function categoryIdForPieceName(categories: StockCategory[], name: string): string | undefined {
+  const nameTokens = tokens(name);
+  const match = [...categories]
+    .sort((a, b) => b.name.length - a.name.length)
+    .find((category) => tokens(category.name).every((token) => nameTokens.includes(token)));
+  return match ? String(match.id) : undefined;
 }
 
 /** Mirrors PurchaseService: weight × rate (× qty for tagged) + making, or a flat service amount. */
@@ -137,6 +206,15 @@ export default function CreatePurchasePage() {
 
   const removeLine = (key: string) => setLines((ls) => (ls.length === 1 ? ls : ls.filter((l) => l.key !== key)));
 
+  /** Adding carries over the previous line's type — flip it on the new line if it differs. */
+  const addLine = () =>
+    setLines((ls) => {
+      const next = blankLine(ls[ls.length - 1]?.kind ?? "tagged");
+      // scroll the fresh line into view once it exists
+      requestAnimationFrame(() => document.getElementById(next.key)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+      return [...ls, next];
+    });
+
   /** Picking a purity fills in today's rate, if we have one and the box is empty. */
   const pickPurity = (line: LineDraft, purityId: string) => {
     const purity = purities.find((p) => String(p.id) === purityId);
@@ -145,35 +223,40 @@ export default function CreatePurchasePage() {
     updateLine(line.key, patch);
   };
 
-  const validate = (): string | null => {
-    if (!supplierId) return "Choose the vendor you bought from.";
-    if (!date) return "Pick the purchase date.";
-    if (lines.length === 0) return "Add at least one line.";
+  /** `at` is the id of the element to scroll to, so the user is taken to the problem. */
+  type Problem = { message: string; at?: string };
+
+  const validate = (): Problem | null => {
+    if (!supplierId) return { message: "Choose the vendor you bought from.", at: "pc_vendor" };
+    if (!date) return { message: "Pick the purchase date.", at: "pc_date" };
+    if (lines.length === 0) return { message: "Add at least one line." };
     for (const [i, l] of lines.entries()) {
       const where = `Line ${i + 1}`;
+      const at = l.key;
       if (l.kind === "service") {
-        if (!l.description.trim()) return `${where}: say what the charge is for.`;
-        if (Number(l.amount || 0) <= 0) return `${where}: enter the amount.`;
+        if (!l.description.trim()) return { message: `${where}: say what the charge is for.`, at };
+        if (Number(l.amount || 0) <= 0) return { message: `${where}: enter the amount.`, at };
         continue;
       }
-      if (!l.purity_id) return `${where}: choose the purity.`;
-      if (Number(l.rate_per_gram || 0) <= 0) return `${where}: enter the metal rate per gram.`;
+      if (!l.purity_id) return { message: `${where}: choose the purity.`, at };
+      if (Number(l.rate_per_gram || 0) <= 0) return { message: `${where}: enter the metal rate per gram.`, at };
       if (l.kind === "tagged") {
-        if (!l.description.trim()) return `${where}: give the piece a name.`;
-        if (Number(l.net_weight || 0) <= 0) return `${where}: enter the net metal weight.`;
-        if (Number(l.net_weight || 0) > Number(l.gross_weight || 0) + 0.0005) {
-          return `${where}: net weight cannot be more than gross weight.`;
+        if (!l.description.trim()) return { message: `${where}: give the piece a name.`, at };
+        if (Number(l.net_weight || 0) <= 0) return { message: `${where}: enter the net metal weight.`, at };
+        // Gross is optional (a plain piece is all metal) — only check it when it was filled in.
+        if (l.gross_weight.trim() !== "" && Number(l.net_weight || 0) > Number(l.gross_weight || 0) + 0.0005) {
+          return { message: `${where}: net weight cannot be more than gross weight.`, at };
         }
       } else {
-        if (Number(l.weight || 0) <= 0) return `${where}: enter the weight in grams.`;
-        if (Number(l.qty || 0) <= 0) return `${where}: enter how many units.`;
+        if (Number(l.weight || 0) <= 0) return { message: `${where}: enter the weight in grams.`, at };
+        if (Number(l.qty || 0) <= 0) return { message: `${where}: enter how many units.`, at };
       }
-      if (lineAmount(l) <= 0) return `${where}: this line adds up to zero.`;
+      if (lineAmount(l) <= 0) return { message: `${where}: this line adds up to zero.`, at };
     }
     if (payNow) {
       const amt = Number(payAmount || 0);
-      if (amt <= 0) return "Enter how much you are paying now, or turn off “Pay now”.";
-      if (amt > totals.grand + 0.01) return "The payment is more than the bill total.";
+      if (amt <= 0) return { message: "Enter how much you are paying now, or turn off “Pay now”.", at: "pc_pay_amount" };
+      if (amt > totals.grand + 0.01) return { message: "The payment is more than the bill total.", at: "pc_pay_amount" };
     }
     return null;
   };
@@ -220,8 +303,16 @@ export default function CreatePurchasePage() {
 
   const save = async () => {
     const problem = validate();
-    setError(problem);
-    if (problem) return;
+    setError(problem?.message ?? null);
+    if (problem) {
+      // The summary card is sticky on the right, so an error there is easy to miss on
+      // a long bill — say it once and take the user to the field that needs fixing.
+      toast.error(problem.message);
+      const target = problem.at ? document.getElementById(problem.at) : null;
+      target?.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement) target.focus({ preventScroll: true });
+      return;
+    }
 
     setBusy(true);
     try {
@@ -298,11 +389,7 @@ export default function CreatePurchasePage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-foreground">New purchase</h2>
-        <p className="text-sm text-muted-foreground">Record what you bought, and it goes straight into your stock.</p>
-      </div>
-
+      {/* Heading lives in the shell header (components/shell/page-header.tsx). */}
       <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr] lg:items-start">
         <div className="space-y-6">
           <Card>
@@ -333,7 +420,7 @@ export default function CreatePurchasePage() {
                 </Label>
                 <Input id="pc_date" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
               </div>
-              <div className="sm:col-span-3">
+              <div className="sm:col-span-2">
                 <Label htmlFor="pc_ref">Vendor bill number</Label>
                 <Input
                   id="pc_ref"
@@ -342,32 +429,24 @@ export default function CreatePurchasePage() {
                   maxLength={60}
                   placeholder="The number printed on their bill"
                 />
+                <p className="mt-1.5 text-xs text-muted-foreground">Optional — leave blank if they did not give a bill.</p>
               </div>
             </div>
           </Card>
 
           <Card className="space-y-5">
-            <CardHeader
-              title="What you bought"
-              action={
-                <div className="flex flex-wrap gap-2">
-                  {(Object.keys(LINE_KIND_LABEL) as LineKind[]).map((k) => (
-                    <Button key={k} variant="secondary" size="sm" onClick={() => setLines((ls) => [...ls, blankLine(k)])}>
-                      <Plus className="h-4 w-4" aria-hidden /> {LINE_KIND_LABEL[k]}
-                    </Button>
-                  ))}
-                </div>
-              }
-            />
+            <CardHeader title="What you bought" subtitle="One line per piece, per metal pool, or per charge." />
 
             {lines.map((line, index) => {
               const metalPurities = purities.filter((p) => p.metal === line.metal);
               return (
-                <div key={line.key} className="rounded-input border border-border bg-background p-4">
+                <div key={line.key} id={line.key} className="rounded-input border border-border bg-background p-4">
                   <div className="mb-4 flex flex-wrap items-center gap-3">
                     <span className="text-xs font-semibold uppercase tracking-[0.4px] text-muted-foreground">
                       Line {index + 1}
                     </span>
+                    {/* The ONLY place a line's type is chosen — adding a line never asks the
+                        question twice (see the single "Add another line" button below). */}
                     <div className="flex flex-wrap gap-1 rounded-pill bg-card p-1">
                       {(Object.keys(LINE_KIND_LABEL) as LineKind[]).map((k) => (
                         <button
@@ -383,7 +462,6 @@ export default function CreatePurchasePage() {
                         </button>
                       ))}
                     </div>
-                    <span className="hidden text-xs text-muted-foreground sm:inline">{LINE_KIND_HINT[line.kind]}</span>
                     <button
                       type="button"
                       onClick={() => removeLine(line.key)}
@@ -394,6 +472,7 @@ export default function CreatePurchasePage() {
                     >
                       <Trash2 className="h-4 w-4" aria-hidden />
                     </button>
+                    <p className="w-full text-xs text-muted-foreground">{LINE_KIND_HINT[line.kind]}</p>
                   </div>
 
                   {line.kind === "service" ? (
@@ -428,10 +507,19 @@ export default function CreatePurchasePage() {
                           <Label htmlFor={`${line.key}_desc`} required>
                             Piece name
                           </Label>
-                          <Input
+                          <PieceNamePicker
                             id={`${line.key}_desc`}
                             value={line.description}
-                            onChange={(e) => updateLine(line.key, { description: e.target.value })}
+                            metal={line.metal}
+                            categories={categories}
+                            onChange={(description) => updateLine(line.key, { description })}
+                            onPick={(description) => {
+                              const categoryId = categoryIdForPieceName(categories, description);
+                              updateLine(line.key, {
+                                description,
+                                ...(categoryId ? { category_id: categoryId } : {}),
+                              });
+                            }}
                             placeholder="e.g. 22K Gold Kada — plain"
                           />
                         </div>
@@ -457,17 +545,11 @@ export default function CreatePurchasePage() {
                         <Label htmlFor={`${line.key}_metal`} required>
                           Metal
                         </Label>
-                        <Select
+                        <MetalSelect
                           id={`${line.key}_metal`}
                           value={line.metal}
-                          onChange={(e) => updateLine(line.key, { metal: e.target.value as Metal, purity_id: "" })}
-                        >
-                          {(Object.keys(METAL_LABEL) as Metal[]).map((m) => (
-                            <option key={m} value={m}>
-                              {METAL_LABEL[m]}
-                            </option>
-                          ))}
-                        </Select>
+                          onChange={(metal) => updateLine(line.key, { metal, purity_id: "" })}
+                        />
                       </div>
 
                       <div>
@@ -499,6 +581,9 @@ export default function CreatePurchasePage() {
                               onChange={(e) => updateLine(line.key, { gross_weight: e.target.value })}
                               placeholder="0.000"
                             />
+                            <p className="mt-1.5 text-xs text-muted-foreground">
+                              Only if the piece has stones — leave blank for plain metal.
+                            </p>
                           </div>
                           <div>
                             <Label htmlFor={`${line.key}_net`} required>
@@ -613,6 +698,12 @@ export default function CreatePurchasePage() {
                 </div>
               );
             })}
+
+            {/* One "add", one "type" — a new line copies the last line's type because
+                purchases usually arrive as a run of the same thing. */}
+            <Button variant="secondary" className="w-full" onClick={addLine}>
+              <Plus className="h-4 w-4" aria-hidden /> Add another line
+            </Button>
           </Card>
 
           <Collapsible label="Note for this purchase" hint="Anything you want to remember later">
@@ -657,7 +748,11 @@ export default function CreatePurchasePage() {
                 <input
                   type="checkbox"
                   checked={payNow}
-                  onChange={(e) => setPayNow(e.target.checked)}
+                  onChange={(e) => {
+                    setPayNow(e.target.checked);
+                    // Paying in full is the common case — offer it, still editable.
+                    if (e.target.checked && !payAmount && totals.grand > 0) setPayAmount(String(totals.grand));
+                  }}
                   className="h-5 w-5 shrink-0 rounded border-border accent-[#4270bf]"
                 />
               </label>
@@ -780,6 +875,135 @@ function SummaryRow({ label, value }: { label: string; value: string }) {
     <div className="flex justify-between gap-4">
       <dt className="text-muted-foreground">{label}</dt>
       <dd className="tabular-nums text-foreground">{value}</dd>
+    </div>
+  );
+}
+
+function PieceNamePicker({
+  id,
+  value,
+  metal,
+  categories,
+  placeholder,
+  onChange,
+  onPick,
+}: {
+  id: string;
+  value: string;
+  metal: Metal;
+  categories: StockCategory[];
+  placeholder?: string;
+  onChange: (value: string) => void;
+  onPick: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const options = useMemo(() => pieceNameOptions(categories, metal), [categories, metal]);
+  const filtered = useMemo(() => {
+    const q = value.trim().toLowerCase();
+    return options.filter((name) => !q || name.toLowerCase().includes(q)).slice(0, 14);
+  }, [options, value]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const choose = (name: string) => {
+    onPick(name);
+    setOpen(false);
+    setHighlight(0);
+    inputRef.current?.blur();
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setOpen(true);
+      setHighlight((h) => Math.min(h + 1, Math.max(filtered.length - 1, 0)));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setHighlight((h) => Math.max(h - 1, 0));
+      return;
+    }
+    if (event.key === "Escape") {
+      setOpen(false);
+      inputRef.current?.blur();
+      return;
+    }
+    if (event.key === "Enter" && open && filtered[highlight]) {
+      event.preventDefault();
+      choose(filtered[highlight]);
+    }
+  };
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Input
+        ref={inputRef}
+        id={id}
+        value={value}
+        onFocus={() => setOpen(true)}
+        onClick={() => setOpen(true)}
+        onChange={(event) => {
+          onChange(event.target.value);
+          setOpen(true);
+          setHighlight(0);
+        }}
+        onKeyDown={onKeyDown}
+        placeholder={placeholder}
+        autoComplete="off"
+        aria-expanded={open}
+        aria-controls={`${id}_options`}
+        className="pr-11"
+      />
+      <button
+        type="button"
+        className="absolute right-3 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+        aria-label="Show piece names"
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => {
+          setOpen((current) => !current);
+          inputRef.current?.focus();
+        }}
+      >
+        <ChevronDown className={cn("h-4 w-4 transition-transform", open && "rotate-180")} aria-hidden />
+      </button>
+
+      {open && filtered.length > 0 ? (
+        <div
+          id={`${id}_options`}
+          role="listbox"
+          className="absolute z-40 mt-2 max-h-72 w-full overflow-y-auto rounded-card border border-border bg-card p-1.5 shadow-modal"
+        >
+          {filtered.map((name, index) => (
+            <button
+              key={name}
+              type="button"
+              role="option"
+              aria-selected={index === highlight}
+              onMouseEnter={() => setHighlight(index)}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => choose(name)}
+              className={cn(
+                "block w-full rounded-input px-3 py-2 text-left text-sm transition-colors",
+                index === highlight ? "bg-primary-soft text-primary-strong" : "text-foreground hover:bg-background",
+              )}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { api } from "@/shared/api/http-client";
 
-export type VendorType =
+/** The ten types baked into the product — they drive the category tabs and the maker picklist. */
+export type BuiltInVendorType =
   | "bullion"
   | "diamond"
   | "stone"
@@ -11,11 +12,21 @@ export type VendorType =
   | "cad"
   | "service"
   | "other";
+/** Built-in or shop-added (vendor_types master) — resolve labels via useVendorTypes().labelOf. */
+export type VendorType = string;
+
+/** A type the shop added itself ("+ Add a new type…"). */
+export interface CustomVendorType {
+  id: number;
+  slug: string;
+  label: string;
+}
 export type VendorStatus = "active" | "inactive" | "blacklisted";
 export type PartnerCategory = "supplier" | "maker" | "service";
 
 export interface Vendor {
   id: number;
+  vendor_code: string | null;
   name: string;
   vendor_type: VendorType;
   company: string | null;
@@ -23,8 +34,11 @@ export interface Vendor {
   gstin: string | null;
   pan_no: string | null;
   mobile: string | null;
+  whatsapp: string | null;
   email: string | null;
   address: string | null;
+  opening_balance: string | null;
+  opening_type: "dr" | "cr";
   city: string | null;
   state: string | null;
   pincode: string | null;
@@ -53,22 +67,8 @@ export interface VendorLinkedItem {
   id: number;
   item_code: string;
   name: string;
-  jw_status: string;
+  status: string;
   current_stock: string;
-}
-
-export interface VendorLinkedOrder {
-  id: number;
-  order_no: string;
-  title: string;
-  status: string;
-}
-
-export interface VendorLinkedRepair {
-  id: number;
-  repair_no: string;
-  item_description: string;
-  status: string;
 }
 
 export interface VendorPurchase {
@@ -76,17 +76,38 @@ export interface VendorPurchase {
   purchase_no: string;
   purchase_date: string;
   status: "draft" | "received" | "cancelled";
+  invoice_ref: string | null;
   grand_total: string;
+  paid_amount: string;
+  balance_due: string;
   payment_status: "unpaid" | "paid";
+}
+
+export interface VendorPaymentRow {
+  id: number;
+  payment_no: string;
+  payment_date: string;
+  payment_mode: "cash" | "bank" | "upi" | "cheque" | "card";
+  amount: string;
+  ref_no: string | null;
+  status: "active" | "cancelled";
+  purchase_no: string | null;
+  account_name: string | null;
 }
 
 export interface VendorSpendSummary {
   total_purchased: number;
+  total_paid: number;
+  /** Opening + billed − paid. Positive = we owe them, negative = advance paid. */
+  balance_due: number;
+  /** Bill-wise arrears only (excludes on-account advances). */
   unpaid_amount: number;
+  opening_balance: number;
   purchase_count: number;
+  payment_count: number;
   item_count: number;
-  order_count: number;
-  open_order_count: number;
+  last_purchase_date: string | null;
+  last_payment_date: string | null;
 }
 
 export interface VendorListResponse {
@@ -97,9 +118,8 @@ export interface VendorListResponse {
 export interface VendorDetailResponse {
   vendor: Vendor;
   items: VendorLinkedItem[];
-  orders: VendorLinkedOrder[];
-  repairs: VendorLinkedRepair[];
   purchases: VendorPurchase[];
+  payments: VendorPaymentRow[];
   summary: VendorSpendSummary;
 }
 
@@ -110,9 +130,11 @@ export const vendorsApi = {
   save: (payload: Record<string, unknown>) => api.post<{ id: number }>("vendors.php", { action: "save", ...payload }),
   toggle: (id: number) => api.post("vendors.php", { action: "toggle", id }),
   remove: (id: number) => api.post("vendors.php", { action: "delete", id }),
+  listTypes: () => api.get<{ types: CustomVendorType[] }>("vendors.php", { view: "types" }),
+  addType: (label: string) => api.post<{ type: CustomVendorType }>("vendors.php", { action: "add_type", label }),
 };
 
-export const VENDOR_TYPE_LABEL: Record<VendorType, string> = {
+export const VENDOR_TYPE_LABEL: Record<string, string> = {
   bullion: "Gold / Bullion Supplier",
   diamond: "Diamond Supplier",
   stone: "Stone / Gem Supplier",
@@ -125,8 +147,8 @@ export const VENDOR_TYPE_LABEL: Record<VendorType, string> = {
   other: "Other",
 };
 
-/** Which business category each partner type belongs to. */
-export const PARTNER_CATEGORY_OF: Record<VendorType, PartnerCategory> = {
+/** Which business category each BUILT-IN partner type belongs to — custom types match none. */
+export const PARTNER_CATEGORY_OF: Record<string, PartnerCategory | undefined> = {
   bullion: "supplier",
   diamond: "supplier",
   stone: "supplier",
@@ -140,7 +162,7 @@ export const PARTNER_CATEGORY_OF: Record<VendorType, PartnerCategory> = {
 };
 
 /** Ordered categories with their member types — drives tabs + grouped dropdowns. */
-export const PARTNER_CATEGORIES: { key: PartnerCategory; label: string; types: VendorType[] }[] = [
+export const PARTNER_CATEGORIES: { key: PartnerCategory; label: string; types: BuiltInVendorType[] }[] = [
   { key: "supplier", label: "Material Suppliers", types: ["bullion", "diamond", "stone", "packaging"] },
   { key: "maker", label: "Jewellery Makers", types: ["karigar", "manufacturer"] },
   { key: "service", label: "Services", types: ["hallmark", "cad", "service", "other"] },

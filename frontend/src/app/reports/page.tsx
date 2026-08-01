@@ -15,6 +15,7 @@ import {
   Boxes,
   ChartLine,
   Download,
+  FileSpreadsheet,
   HandCoins,
   IndianRupee,
   Receipt,
@@ -50,7 +51,8 @@ const FINANCIAL_REPORTS: {
   href: string;
   title: string;
   description: string;
-  permission: string;
+  permission?: string;
+  anyOf?: string[];
   icon: LucideIcon;
 }[] = [
   {
@@ -73,6 +75,13 @@ const FINANCIAL_REPORTS: {
     description: "Tax collected, tax paid, and what is due.",
     permission: "reports.gst",
     icon: Receipt,
+  },
+  {
+    href: "/reports/ledger-view",
+    title: "Ledger Views",
+    description: "Full books or GST-facing ledger, by role.",
+    anyOf: ["reports.accounting", "reports.gst"],
+    icon: FileSpreadsheet,
   },
   {
     href: "/reports/outstanding",
@@ -98,8 +107,8 @@ const FINANCIAL_REPORTS: {
 ];
 
 function FinancialReports() {
-  const { can } = usePermissions();
-  const allowed = FINANCIAL_REPORTS.filter((r) => can(r.permission));
+  const { can, canAny } = usePermissions();
+  const allowed = FINANCIAL_REPORTS.filter((r) => (r.permission ? can(r.permission) : canAny(...(r.anyOf ?? []))));
   if (allowed.length === 0) return null;
 
   return (

@@ -229,6 +229,16 @@ export function ItemModal({
                 </optgroup>
               ) : null;
             })}
+            {/* shop-added types belong to no built-in category — don't lose those vendors */}
+            {vendors.some((v) => !PARTNER_CATEGORY_OF[v.vendor_type]) ? (
+              <optgroup label="Other">
+                {vendors
+                  .filter((v) => !PARTNER_CATEGORY_OF[v.vendor_type])
+                  .map((v) => (
+                    <option key={v.id} value={v.id}>{v.name}</option>
+                  ))}
+              </optgroup>
+            ) : null}
           </Select>
         </div>
         {type === "stock" ? (

@@ -15,12 +15,14 @@ import {
 } from "@/features/billing/calc";
 import { CustomerStrip } from "@/features/billing/customer-strip";
 import { HeldBillsDialog } from "@/features/billing/held-bills-dialog";
+import { ItemDetailsDialog } from "@/features/billing/item-details-dialog";
 import { ItemSearch } from "@/features/billing/item-search";
 import { LineItemsTable } from "@/features/billing/line-items-table";
 import { OldMetalPanel } from "@/features/billing/old-metal-panel";
 import { PaymentRow } from "@/features/billing/payment-row";
 import { TotalsPanel } from "@/features/billing/totals-panel";
 import type {
+  BillTaxMode,
   BillCustomer,
   BillLine,
   InvoiceDetail,
@@ -29,6 +31,7 @@ import type {
   PaymentMode,
   PriceMode,
 } from "@/features/billing/types";
+import { useAuth } from "@/lib/auth";
 import { usePermissions } from "@/lib/permissions";
 import { ApiError } from "@/shared/api/api-error";
 import { Badge } from "@/shared/ui/badge";
@@ -39,20 +42,40 @@ import { EmptyState } from "@/shared/ui/empty-state";
 import { Input, Label } from "@/shared/ui/input";
 import { SkeletonCard } from "@/shared/ui/skeleton";
 import { Textarea } from "@/shared/ui/textarea";
-import { localDateString } from "@/shared/utils/format";
+import { cn } from "@/shared/utils/cn";
+import { formatCurrency, localDateString } from "@/shared/utils/format";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, Files, Gem, Printer, TrendingUp } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, Files, Gem, Printer, TrendingUp } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 /**
+ * The four steps of a bill, shown ONE AT A TIME. The counter answers a single
+ * question per screen and presses Next; finished steps are a tap away on the
+ * rail. Old metal is a full step so it is never missed, but everything on it is
+ * optional — Next walks straight past it.
+ */
+const STEPS = [
+  { title: "Customer", heading: "Who is buying?", hint: "Pick a customer already on file, or add them in a moment." },
+  { title: "Items", heading: "What are they buying?", hint: "Scan the tag, tap the box to browse, or type to search." },
+  {
+    title: "Old metal",
+    heading: "Old gold or silver given?",
+    hint: "Optional — its value comes off the bill. Press Next to skip.",
+  },
+  { title: "Payment", heading: "Money received", hint: "Tap how they are paying — the amount owed is filled in for you." },
+] as const;
+
+const WITHOUT_GST_REASON = "Without GST";
+
+/**
  * The New Bill screen — the most-used page in the shop.
  *
- * One screen, no wizard, keyboard first: the scanner types into the item box and
- * presses Enter. Everything on screen is a LIVE ESTIMATE; the server recomputes
- * and re-prices on draft_save and again inside the finalize transaction, so a
+ * Step-by-step, keyboard first: the scanner types into the item box and presses
+ * Enter. Everything on screen is a LIVE ESTIMATE; the server recomputes and
+ * re-prices on draft_save and again inside the finalize transaction, so a
  * disagreement between these figures and the printed bill is never fatal.
  */
 function BillBuilder() {
@@ -60,21 +83,32 @@ function BillBuilder() {
   const params = useSearchParams();
   const urlId = Number(params.get("id")) || null;
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const { can, isLoading: permissionsLoading } = usePermissions();
   const canOverride = can("invoices.override");
+  const canSeeFullLedger = user?.username === "Admin";
   const defaultTaxRate = useDefaultTaxRate();
 
   const [draftId, setDraftId] = useState<number | null>(urlId);
   const [customer, setCustomer] = useState<BillCustomer | null>(null);
+  // Step 1 is answered by picking a customer. Until then step 2 stays shut: staff
+  // opening a bare search box could not tell whether it wanted a customer or an
+  // item. Set on hydrate too, so a draft saved as a walk-in before walk-in billing
+  // was removed still opens on its items instead of demanding a customer.
+  const [customerChosen, setCustomerChosen] = useState(false);
   const [walkin, setWalkin] = useState({ name: "", phone: "" });
   const [billDate, setBillDate] = useState(localDateString());
-  const [priceMode, setPriceMode] = useState<PriceMode>("exclusive");
+  const [priceMode, setPriceMode] = useState<BillTaxMode>("exclusive");
   const [discount, setDiscount] = useState(0);
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<BillLine[]>([]);
   const [oldMetal, setOldMetal] = useState<OldMetalLine[]>([]);
   const [payments, setPayments] = useState<PaymentLine[]>([]);
 
+  /** The line the step-by-step details dialog is showing, if any. */
+  const [editing, setEditing] = useState<{ line: BillLine; isNew: boolean } | null>(null);
+  /** Which of the four STEPS is on screen. One at a time — this IS the page. */
+  const [step, setStep] = useState(0);
   const [heldOpen, setHeldOpen] = useState(false);
   const [conflict, setConflict] = useState<string | null>(null);
   const [ratesAcknowledged, setRatesAcknowledged] = useState(false);
@@ -89,6 +123,7 @@ function BillBuilder() {
     staleTime: 60_000,
   });
   const purities = meta?.purities ?? [];
+  const categories = meta?.categories ?? [];
   const bankAccounts = meta?.bank_accounts ?? [];
   const ratesSetToday = meta?.rates_set_today ?? true;
 
@@ -117,8 +152,12 @@ function BillBuilder() {
         : null,
     );
     setWalkin({ name: invoice.walkin_name ?? "", phone: invoice.walkin_phone ?? "" });
+    // a resumed draft already answered the customer question — open on its items
+    setCustomerChosen(true);
+    setStep(1);
+    const invoiceWithoutGst = invoice.items.length > 0 && invoice.items.every((item) => item.tax_treatment !== "taxable");
     setBillDate(invoice.invoice_date);
-    setPriceMode(invoice.price_mode);
+    setPriceMode(invoiceWithoutGst ? "without_gst" : invoice.price_mode);
     setDiscount(num(invoice.discount_total));
     setNotes(invoice.notes ?? "");
     setLines(
@@ -143,8 +182,8 @@ function BillBuilder() {
           making_value: qty > 0 ? num(item.making_charge) / qty : num(item.making_charge),
           discount: num(item.discount),
           tax_rate: num(item.tax_rate),
-          tax_treatment: item.tax_treatment,
-          exempt_reason: item.exempt_reason,
+          tax_treatment: "taxable",
+          exempt_reason: null,
         } satisfies BillLine;
       }),
     );
@@ -182,14 +221,41 @@ function BillBuilder() {
       toast.warning(`No rate on file for ${line.purity_code ?? "this purity"} — the bill will price it when you save.`);
     }
   };
-  const patchLine = (key: string, patch: Partial<BillLine>) =>
-    setLines((current) => current.map((line) => (line.key === key ? { ...line, ...patch } : line)));
   const removeLine = (key: string) => setLines((current) => current.filter((line) => line.key !== key));
+
+  /**
+   * A scanned TAGGED piece carrying a rate lands on the bill straight away and
+   * the scanner keeps its rhythm. Anything sold by weight, or any item with no
+   * rate on file, opens the detail dialog so the bill cannot sit at zero.
+   */
+  const onPickItem = (line: BillLine) => {
+    if (line.tracking === "bulk" || num(line.rate_per_gram) <= 0) {
+      setEditing({ line, isNew: true });
+      return;
+    }
+    addLine(line);
+  };
+
+  const onSaveDetails = (line: BillLine) => {
+    if (editing?.isNew) {
+      addLine(line);
+    } else {
+      setLines((current) => current.map((row) => (row.key === line.key ? line : row)));
+    }
+    setEditing(null);
+  };
 
   const patchOldMetal = (key: string, patch: Partial<OldMetalLine>) =>
     setOldMetal((current) => current.map((row) => (row.key === key ? { ...row, ...patch } : row)));
 
-  const totals = billTotals(lines, oldMetal, discount, priceMode);
+  const withoutGst = priceMode === "without_gst";
+  const serverPriceMode: PriceMode = priceMode === "inclusive" ? "inclusive" : "exclusive";
+  const billLines: BillLine[] = lines.map((line) =>
+    withoutGst
+      ? { ...line, tax_treatment: "non_gst", exempt_reason: WITHOUT_GST_REASON }
+      : { ...line, tax_treatment: "taxable", exempt_reason: null },
+  );
+  const totals = billTotals(billLines, oldMetal, discount, serverPriceMode);
 
   const addPayment = (mode: PaymentMode) => {
     setPayments((current) => {
@@ -205,6 +271,7 @@ function BillBuilder() {
     hydratedFor.current = null;
     setDraftId(null);
     setCustomer(null);
+    setCustomerChosen(false);
     setWalkin({ name: "", phone: "" });
     setBillDate(localDateString());
     setPriceMode("exclusive");
@@ -213,6 +280,7 @@ function BillBuilder() {
     setLines([]);
     setOldMetal([]);
     setPayments([]);
+    setStep(0);
     router.replace("/invoices/create");
   };
 
@@ -224,10 +292,10 @@ function BillBuilder() {
     walkin_name: customer ? null : walkin.name.trim() || null,
     walkin_phone: customer ? null : walkin.phone.trim() || null,
     invoice_date: billDate,
-    price_mode: priceMode,
+    price_mode: serverPriceMode,
     discount: num(discount),
     notes: notes.trim() || null,
-    items: lines.map(lineToPayload),
+    items: billLines.map(lineToPayload),
     old_metal: oldMetal.filter((row) => num(row.gross_weight) > 0).map(oldMetalToPayload),
   });
 
@@ -315,12 +383,18 @@ function BillBuilder() {
       await billingApi.finalize(res.id, paymentPayload);
       invalidate();
       toast.success("Bill saved.");
+      if (!canSeeFullLedger && withoutGst) {
+        startNew();
+        return;
+      }
       router.push(`/invoices/detail?id=${res.id}&print=1`);
     } catch (e) {
       // 409 = another counter took the same piece first. Expected, not an error
       // to shrug at — show exactly what the server said and refresh the lines.
       if (e instanceof ApiError && e.status === 409) {
         setConflict(e.message);
+        // the fix lives on the items step — put the counter back there
+        setStep(1);
         if (savedId) void refreshFromServer(savedId);
         invalidate();
       } else {
@@ -355,9 +429,21 @@ function BillBuilder() {
   if (urlId !== null && loadingExisting) return <SkeletonCard lines={10} />;
 
   const ratesBlock = !ratesSetToday && !ratesAcknowledged;
+  const step1Done = customer !== null || customerChosen;
+  const onLastStep = step === STEPS.length - 1;
+
+  /** Leaving a step checks it; going back never does. */
+  const next = () => {
+    if (step === 0 && !step1Done) {
+      toast.error("Choose the customer first — tap Walk-in if they are not a regular.");
+      return;
+    }
+    if (step === 1 && !validate()) return;
+    setStep((s) => Math.min(s + 1, STEPS.length - 1));
+  };
 
   return (
-    <div className="space-y-5">
+    <div className="mx-auto max-w-4xl space-y-5 pb-24">
       {/* ------------------------------------------------------------ header */}
       <div className="flex flex-wrap items-center gap-3">
         <Link
@@ -367,7 +453,7 @@ function BillBuilder() {
         >
           <ArrowLeft className="h-5 w-5" aria-hidden />
         </Link>
-        <h2 className="text-xl font-bold text-foreground">New bill</h2>
+        {/* Heading lives in the shell header (components/shell/page-header.tsx). */}
         {draftId ? <Badge tone="purple">Held draft #{draftId}</Badge> : null}
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {draftId ? (
@@ -407,57 +493,113 @@ function BillBuilder() {
         </div>
       ) : null}
 
-      {/* -------------------------------------------------------- customer */}
-      <Card className="p-4">
-        <CustomerStrip
-          customer={customer}
-          onCustomerChange={setCustomer}
-          walkinName={walkin.name}
-          walkinPhone={walkin.phone}
-          onWalkinChange={(patch) => setWalkin((current) => ({ ...current, ...patch }))}
-        />
-      </Card>
+      {/* ------------------------------------------------- the step rail */}
+      <ol className="flex items-center gap-2 px-1">
+        {STEPS.map((s, idx) => {
+          const done = idx < step;
+          return (
+            <li key={s.title} className="flex min-w-0 flex-1 items-center gap-2">
+              <button
+                type="button"
+                // finished steps are a tap away; the future stays behind Next
+                onClick={() => (done ? setStep(idx) : undefined)}
+                disabled={!done}
+                aria-current={idx === step ? "step" : undefined}
+                aria-label={done ? `Back to ${s.title}` : s.title}
+                className={cn(
+                  "flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold transition-colors",
+                  done && "bg-success-soft text-success-strong hover:bg-success-soft/70",
+                  idx === step && "bg-primary text-white shadow-card",
+                  idx > step && "bg-card text-muted-foreground",
+                )}
+              >
+                {done ? <Check className="h-4 w-4" aria-hidden /> : idx + 1}
+              </button>
+              <span
+                className={cn(
+                  "truncate text-sm font-semibold",
+                  idx === step ? "text-foreground" : "hidden text-muted-foreground sm:block",
+                )}
+              >
+                {s.title}
+              </span>
+              {idx < STEPS.length - 1 ? <span className="h-px min-w-3 flex-1 bg-border" aria-hidden /> : null}
+            </li>
+          );
+        })}
+      </ol>
 
-      <div className="grid gap-5 lg:grid-cols-[1.6fr_1fr] lg:items-start">
-        {/* -------------------------------------------------- items + lines */}
-        <div className="space-y-5">
-          <Card className="p-4">
+      {/* ------------------------------------------------ the current step */}
+      {/* No min-height: the customer step is two cards tall and a fixed floor
+          left a slab of empty white under it. */}
+      <Card className="p-5 sm:p-6">
+        <div className="mb-5">
+          <h3 className="text-lg font-bold text-foreground">{STEPS[step].heading}</h3>
+          <p className="mt-0.5 text-sm text-muted-foreground">{STEPS[step].hint}</p>
+        </div>
+
+        {/* ------------------------------------------- 1. who is buying */}
+        {step === 0 ? (
+          <CustomerStrip
+            customer={customer}
+            onCustomerChange={(c) => {
+              setCustomer(c);
+              // picking a customer IS the answer — walk straight to the items, no
+              // Next press. "Change" clears it and puts the two choices back.
+              setCustomerChosen(c !== null);
+              if (c) setStep(1);
+            }}
+            walkinName={walkin.name}
+            walkinPhone={walkin.phone}
+            onWalkinChange={(patch) => setWalkin((current) => ({ ...current, ...patch }))}
+            requireChoice
+            chosen={customerChosen}
+          />
+        ) : null}
+
+        {/* ---------------------------------------- 2. what they buy */}
+        {step === 1 ? (
+          <div className="space-y-4">
             <ItemSearch
               disabled={ratesBlock}
-              onPick={(item, picked) => addLine(lineFromStockItem(item, purities, defaultTaxRate, picked))}
+              categories={categories}
+              excludeIds={lines.map((l) => l.item_id).filter((id): id is number => id !== null)}
+              onPick={(item, picked) => onPickItem(lineFromStockItem(item, purities, defaultTaxRate, picked))}
             />
-            <div className="mt-4">
-              <LineItemsTable
-                lines={lines}
-                priceMode={priceMode}
-                canOverride={canOverride}
-                onChange={patchLine}
-                onRemove={removeLine}
-                emptyState={
-                  <EmptyState
-                    icon={Gem}
-                    title="Scan the first item"
-                    hint="Point the scanner at the tag, or type a few letters of the item name and press Enter."
-                  />
-                }
-              />
-            </div>
+            <LineItemsTable
+              lines={billLines}
+              priceMode={serverPriceMode}
+              onEdit={(key) => {
+                const line = lines.find((row) => row.key === key);
+                if (line) setEditing({ line, isNew: false });
+              }}
+              onRemove={removeLine}
+              emptyState={
+                <EmptyState
+                  icon={Gem}
+                  title="Scan the first item"
+                  hint="Point the scanner at the tag, tap the box to browse the stock list, or type a few letters and press Enter."
+                />
+              }
+            />
             {!canOverride && lines.length > 0 ? (
-              <p className="mt-3 text-xs text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 Rates and making charges come from today&apos;s rates and the item tag. Ask a manager to change them.
               </p>
             ) : null}
-          </Card>
+          </div>
+        ) : null}
 
-          <OldMetalPanel
-            rows={oldMetal}
-            purities={purities}
-            onChange={patchOldMetal}
-            onAdd={() => setOldMetal((current) => [...current, blankOldMetal(purities)])}
-            onRemove={(key) => setOldMetal((current) => current.filter((row) => row.key !== key))}
-          />
-
-          <Card className="p-4">
+        {/* ------------------------------- 3. old metal + bill details */}
+        {step === 2 ? (
+          <div className="space-y-5">
+            <OldMetalPanel
+              rows={oldMetal}
+              purities={purities}
+              onChange={patchOldMetal}
+              onAdd={() => setOldMetal((current) => [...current, blankOldMetal(purities)])}
+              onRemove={(key) => setOldMetal((current) => current.filter((row) => row.key !== key))}
+            />
             <div className="grid gap-4 sm:grid-cols-[200px_1fr]">
               <div>
                 <Label htmlFor="bill_date">Bill date</Label>
@@ -474,58 +616,93 @@ function BillBuilder() {
                 />
               </div>
             </div>
-          </Card>
-        </div>
+          </div>
+        ) : null}
 
-        {/* ----------------------------------------------- totals + payment */}
-        <div className="space-y-5 lg:sticky lg:top-6">
-          <Card className="p-5">
+        {/* -------------------------------------- 4. totals + payment */}
+        {step === 3 ? (
+          <div className="grid gap-6 lg:grid-cols-2">
             <TotalsPanel
               totals={totals}
               priceMode={priceMode}
               onPriceModeChange={setPriceMode}
               discount={discount}
               onDiscountChange={setDiscount}
+              allowWithoutGst={canOverride}
             />
-          </Card>
+            <div>
+              <p className="mb-3 text-xs font-medium uppercase tracking-[0.4px] text-muted-foreground">Money received</p>
+              <PaymentRow
+                payments={payments}
+                total={totals.grand}
+                bankAccounts={bankAccounts}
+                onAdd={addPayment}
+                onChange={patchPayment}
+                onRemove={(key) => setPayments((current) => current.filter((p) => p.key !== key))}
+              />
+              <p className="mt-4 text-xs text-muted-foreground">
+                The final figures are recalculated by the shop system when the bill is saved.
+              </p>
+            </div>
+          </div>
+        ) : null}
+      </Card>
 
-          <Card className="p-5">
-            <p className="mb-3 text-xs font-medium uppercase tracking-[0.4px] text-muted-foreground">Money received</p>
-            <PaymentRow
-              payments={payments}
-              total={totals.grand}
-              bankAccounts={bankAccounts}
-              onAdd={addPayment}
-              onChange={patchPayment}
-              onRemove={(key) => setPayments((current) => current.filter((p) => p.key !== key))}
-            />
-            <div className="mt-5 flex flex-col gap-2">
+      {/* -------------------------------- the bar that drives the flow */}
+      <div className="sticky bottom-4 z-20 flex items-center gap-3 rounded-card border border-border bg-card p-4 shadow-modal">
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.4px] text-muted-foreground">Grand total</p>
+          <p className="text-xl font-bold tabular-nums text-foreground">{formatCurrency(totals.grand, true)}</p>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          {lines.length > 0 && !onLastStep ? (
+            <Button variant="ghost" type="button" loading={saving === "draft"} onClick={() => void onSaveDraft()}>
+              Hold bill
+            </Button>
+          ) : null}
+          {step > 0 ? (
+            <Button variant="secondary" type="button" onClick={() => setStep((s) => s - 1)}>
+              Back
+            </Button>
+          ) : null}
+          {onLastStep ? (
+            <>
+              <Button variant="secondary" type="button" loading={saving === "draft"} onClick={() => void onSaveDraft()}>
+                Save draft
+              </Button>
               <Button
                 variant="cta"
                 type="button"
-                className="h-12 text-base"
+                className="h-12 px-6 text-base"
                 disabled={ratesBlock || lines.length === 0}
                 loading={saving === "final"}
                 onClick={() => void onSaveAndPrint()}
               >
                 <Printer className="h-5 w-5" aria-hidden /> Save &amp; Print
               </Button>
-              <Button
-                variant="secondary"
-                type="button"
-                disabled={ratesBlock || lines.length === 0}
-                loading={saving === "draft"}
-                onClick={() => void onSaveDraft()}
-              >
-                Save draft
-              </Button>
-            </div>
-            <p className="mt-3 text-center text-xs text-muted-foreground">
-              The final figures are recalculated by the shop system when the bill is saved.
-            </p>
-          </Card>
+            </>
+          ) : (
+            <Button
+              type="button"
+              className="h-12 px-8 text-base"
+              disabled={(step === 0 && !step1Done) || (step === 1 && lines.length === 0)}
+              onClick={next}
+            >
+              Next
+            </Button>
+          )}
         </div>
       </div>
+
+      <ItemDetailsDialog
+        line={editing?.line ?? null}
+        isNew={editing?.isNew ?? false}
+        priceMode={serverPriceMode}
+        canOverride={canOverride}
+        withoutGst={withoutGst}
+        onClose={() => setEditing(null)}
+        onSave={onSaveDetails}
+      />
 
       <HeldBillsDialog
         open={heldOpen}

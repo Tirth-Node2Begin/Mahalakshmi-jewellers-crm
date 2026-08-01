@@ -9,9 +9,11 @@ use CRM\Core\Response;
 use CRM\Customers\CustomerRepository;
 use CRM\Customers\CustomerService;
 use CRM\Database\Database;
+use CRM\Support\GstVisibility;
 use CRM\Validation\Validator;
 
 $user = requireApiAuth();
+$gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
 
 if (Request::method() === 'GET') {
     requirePermission('customers.read');
@@ -22,9 +24,9 @@ if (Request::method() === 'GET') {
         Response::success([
             'customer' => $customer,
             'family' => CustomerRepository::family($id),
-            'invoices' => CustomerRepository::invoices($id),
+            'invoices' => CustomerRepository::invoices($id, $gstVisibleOnly),
             'events' => CustomerRepository::events($id),
-            'totals' => CustomerRepository::totals($id),
+            'totals' => CustomerRepository::totals($id, $gstVisibleOnly),
             'users' => Database::fetchAll('SELECT id, full_name FROM users WHERE is_active = 1 ORDER BY full_name'),
         ]);
     }

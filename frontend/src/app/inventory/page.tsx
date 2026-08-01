@@ -1,6 +1,7 @@
 "use client";
 
-import { METAL_LABEL, stockApi, type Metal, type StockSummaryRow } from "@/features/stock/api";
+import { metalLabel, stockApi, type Metal, type StockSummaryRow } from "@/features/stock/api";
+import { useMetals } from "@/features/stock/metal-select";
 import { useCanSeeCost } from "@/features/stock/permissions";
 import { Card, CardHeader } from "@/shared/ui/card";
 import { EmptyState } from "@/shared/ui/empty-state";
@@ -11,8 +12,6 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeftRight, Boxes, Coins, Gem, IndianRupee, Scale } from "lucide-react";
 import Link from "next/link";
 import { useMemo } from "react";
-
-const METAL_ORDER: Metal[] = ["gold", "silver"];
 
 interface MetalTotals {
   pieces: number;
@@ -31,6 +30,7 @@ export default function StockSummaryPage() {
     queryKey: ["stock", "summary"],
     queryFn: () => stockApi.summary(),
   });
+  const { data: metalsData } = useMetals();
 
   const rows = useMemo(() => data?.summary ?? [], [data]);
 
@@ -65,6 +65,17 @@ export default function StockSummaryPage() {
     return map;
   }, [rows]);
 
+  /**
+   * Metals to show, in master order, with anything the summary carries that is no
+   * longer in the master appended — a metal the shop stopped dealing in still has
+   * stock on the shelf, and dropping it here would hide it.
+   */
+  const metalOrder = useMemo(() => {
+    const known = (metalsData?.metals ?? []).map((m) => m.code);
+    const present = [...totals.keys()];
+    return [...known, ...present.filter((m) => !known.includes(m))];
+  }, [metalsData, totals]);
+
   const grandWeight = rows.reduce((sum, r) => sum + Number(r.weight ?? 0), 0);
   const grandValue = rows.reduce((sum, r) => sum + Number(r.value ?? 0), 0);
 
@@ -88,10 +99,8 @@ export default function StockSummaryPage() {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
-        <div className="min-w-0 flex-1">
-          <h2 className="text-xl font-bold text-foreground">Stock in hand</h2>
-          <p className="text-sm text-muted-foreground">Everything on the shelf right now, metal by metal.</p>
-        </div>
+        {/* Heading lives in the shell header (components/shell/page-header.tsx). */}
+        <div className="min-w-0 flex-1" />
         <Link
           href="/inventory/items"
           className="inline-flex h-10 items-center gap-2 rounded-pill border border-border bg-card px-5 text-sm font-semibold text-primary-strong transition-colors hover:bg-primary-soft"
@@ -106,14 +115,19 @@ export default function StockSummaryPage() {
         </Link>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {METAL_ORDER.map((metal) => {
+      {/* one card per metal + weight + value — all in ONE row on desktop, however
+          many metals the shop has (the metals master can grow) */}
+      <div
+        className="grid grid-cols-2 gap-4 lg:grid-cols-[repeat(var(--kpi-cols),minmax(0,1fr))]"
+        style={{ "--kpi-cols": metalOrder.length + 2 } as React.CSSProperties}
+      >
+        {metalOrder.map((metal) => {
           const t = totals.get(metal) ?? emptyTotals();
           return (
             <KpiCard
               key={metal}
               icon={metal === "gold" ? Coins : Boxes}
-              label={`${METAL_LABEL[metal]} — pieces in stock`}
+              label={`${metalLabel(metal, metalsData?.metals)} — pieces in stock`}
               value={Math.round(t.pieces)}
               tone={metal === "gold" ? "amber" : "sky"}
             />
@@ -127,7 +141,7 @@ export default function StockSummaryPage() {
             icon={Scale}
             label="Loose metal (bulk)"
             value={formatWeight(
-              METAL_ORDER.reduce((sum, m) => sum + (totals.get(m)?.bulkWeight ?? 0), 0),
+              metalOrder.reduce((sum, m) => sum + (totals.get(m)?.bulkWeight ?? 0), 0),
             )}
             tone="gray"
           />
@@ -143,7 +157,7 @@ export default function StockSummaryPage() {
           />
         </Card>
       ) : (
-        METAL_ORDER.map((metal) => {
+        metalOrder.map((metal) => {
           const purities = byMetal.get(metal);
           if (!purities || purities.size === 0) return null;
           const t = totals.get(metal) ?? emptyTotals();
@@ -153,7 +167,7 @@ export default function StockSummaryPage() {
                 className="px-6 pt-6"
                 title={
                   <span className="flex items-baseline gap-3">
-                    {METAL_LABEL[metal]}
+                    {metalLabel(metal, metalsData?.metals)}
                     <span className="text-sm font-normal text-muted-foreground">
                       {formatWeight(t.weight)}
                       {canSeeCost ? ` · ${formatCurrency(t.value)}` : ""}

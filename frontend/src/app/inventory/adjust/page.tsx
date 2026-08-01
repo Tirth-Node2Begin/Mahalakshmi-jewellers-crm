@@ -1,6 +1,6 @@
 "use client";
 
-import { METAL_LABEL, stockApi, TRACKING_LABEL, type StockItem } from "@/features/stock/api";
+import { metalLabel, stockApi, TRACKING_LABEL, type StockItem } from "@/features/stock/api";
 import { useCanSeeCost } from "@/features/stock/permissions";
 import { usePermissions } from "@/lib/permissions";
 import { ApiError } from "@/shared/api/api-error";
@@ -34,6 +34,7 @@ export default function StockAdjustPage() {
   const [direction, setDirection] = useState<"in" | "out">("in");
   const [qty, setQty] = useState("1");
   const [weight, setWeight] = useState("");
+  const [ratePerGram, setRatePerGram] = useState("");
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -55,12 +56,22 @@ export default function StockAdjustPage() {
 
   const availability = detailData?.item.availability;
   const results = listData?.items ?? [];
+  const purities = listData?.purities ?? [];
+  const estimatedValue = Number(weight || 0) * Number(ratePerGram || 0);
+
+  const defaultRateForItem = (item: StockItem): string => {
+    const currentCost = Number(item.avg_cost ?? 0);
+    if (currentCost > 0) return String(currentCost);
+    const purity = purities.find((p) => p.metal === item.metal && p.code === item.purity_code);
+    return purity?.rate_per_gram && Number(purity.rate_per_gram) > 0 ? String(Number(purity.rate_per_gram)) : "";
+  };
 
   const reset = () => {
     setPicked(null);
     setDirection("in");
     setQty("1");
     setWeight("");
+    setRatePerGram("");
     setReason("");
     setError(null);
   };
@@ -70,6 +81,9 @@ export default function StockAdjustPage() {
     const w = Number(weight);
     if (!w || w <= 0) return "Enter the weight being added or removed.";
     if (Number(qty) < 0) return "Quantity cannot be negative.";
+    if (direction === "in" && Number(ratePerGram || 0) <= 0) {
+      return "Enter the rate per gram so this stock has a value.";
+    }
     if (!reason.trim()) return "Write why this correction is being made — it is kept in the records.";
     if (direction === "out" && availability && w > availability.weight + 0.0005) {
       return `Only ${formatWeight(availability.weight)} of this item is in stock.`;
@@ -92,6 +106,7 @@ export default function StockAdjustPage() {
         direction,
         qty: qty ? Number(qty) : undefined,
         weight: Number(weight),
+        ...(direction === "in" ? { rate_per_gram: Number(ratePerGram) } : {}),
         reason: reason.trim(),
       });
       toast.success("Stock corrected.");
@@ -121,14 +136,7 @@ export default function StockAdjustPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-foreground">Correct stock</h2>
-        <p className="text-sm text-muted-foreground">
-          Use this only when the shelf and the computer disagree. Every correction is signed with your name and your
-          reason.
-        </p>
-      </div>
-
+      {/* Heading lives in the shell header (components/shell/page-header.tsx). */}
       <div className="grid gap-6 lg:grid-cols-[1fr_1.4fr]">
         <Card className="p-0">
           <CardHeader className="px-6 pt-6" title="1. Pick the item" />
@@ -165,6 +173,7 @@ export default function StockAdjustPage() {
                         setError(null);
                         setQty(it.tracking === "tagged" ? "1" : "");
                         setWeight("");
+                        setRatePerGram(defaultRateForItem(it));
                       }}
                       className={cn(
                         "flex w-full flex-wrap items-center gap-3 border-b border-border/60 px-6 py-3 text-left transition-colors hover:bg-background",
@@ -179,7 +188,7 @@ export default function StockAdjustPage() {
                         </span>
                       </span>
                       <Badge tone={it.metal === "silver" ? "blue" : "gold"}>
-                        {it.metal ? METAL_LABEL[it.metal] : "—"}
+                        {metalLabel(it.metal)}
                       </Badge>
                     </button>
                   </li>
@@ -230,7 +239,10 @@ export default function StockAdjustPage() {
                 {(["in", "out"] as const).map((d) => (
                   <button
                     key={d}
-                    onClick={() => setDirection(d)}
+                    onClick={() => {
+                      setDirection(d);
+                      if (d === "in" && picked && !ratePerGram) setRatePerGram(defaultRateForItem(picked));
+                    }}
                     className={cn(
                       "flex-1 rounded-pill py-2 text-sm font-semibold transition-colors",
                       direction === d ? "bg-card text-primary-strong shadow-card" : "text-muted-foreground",
@@ -241,7 +253,7 @@ export default function StockAdjustPage() {
                 ))}
               </div>
 
-              <div className="grid gap-5 sm:grid-cols-2">
+              <div className={cn("grid gap-5", direction === "in" ? "sm:grid-cols-3" : "sm:grid-cols-2")}>
                 <div>
                   <Label htmlFor="aj_weight" required>
                     Weight ({direction === "in" ? "added" : "removed"})
@@ -262,6 +274,23 @@ export default function StockAdjustPage() {
                     {picked.tracking === "tagged" ? "A tagged piece is always 1." : "How many units of the pool."}
                   </p>
                 </div>
+                {direction === "in" ? (
+                  <div>
+                    <Label htmlFor="aj_rate" required>
+                      Rate / g
+                    </Label>
+                    <Input
+                      id="aj_rate"
+                      inputMode="decimal"
+                      value={ratePerGram}
+                      onChange={(e) => setRatePerGram(e.target.value)}
+                      placeholder="0.00"
+                    />
+                    <p className="mt-1.5 text-xs text-muted-foreground">
+                      Stock value: {formatCurrency(estimatedValue, true)}
+                    </p>
+                  </div>
+                ) : null}
               </div>
 
               <div>
@@ -335,6 +364,12 @@ export default function StockAdjustPage() {
             <ConfirmRow label="Change" value={direction === "in" ? "Adding to stock" : "Removing from stock"} />
             <ConfirmRow label="Weight" value={formatWeight(weight || 0)} />
             <ConfirmRow label="Pieces" value={qty || "1"} />
+            {direction === "in" ? (
+              <>
+                <ConfirmRow label="Rate / g" value={formatCurrency(ratePerGram, true)} />
+                <ConfirmRow label="Stock value" value={formatCurrency(estimatedValue, true)} />
+              </>
+            ) : null}
             <ConfirmRow label="Reason" value={reason} />
           </dl>
         </div>

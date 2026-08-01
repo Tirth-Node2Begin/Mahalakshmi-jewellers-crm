@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CRM\Reports;
 
 use CRM\Database\Database;
+use CRM\Support\GstVisibility;
 
 /**
  * Reports aggregation. Every tab takes a [from,to] window.
@@ -21,43 +22,64 @@ final class ReportsRepository
     private const UNSETTLED = "status = 'final' AND paid_amount < grand_total";
 
     // ---------------------------------------------------------------- Tab 1: Revenue
-    public static function revenue(string $from, string $to): array
+    public static function revenue(string $from, string $to, bool $gstVisibleOnly = false): array
     {
-        return [
-            'trend' => Database::fetchAll(
-                "SELECT m, SUM(billed) billed, SUM(collected) collected FROM (
-                    SELECT DATE_FORMAT(invoice_date,'%Y-%m') m, grand_total billed, 0 collected FROM invoices WHERE status = 'final' AND invoice_date BETWEEN :f1 AND :t1
-                    UNION ALL
-                    SELECT DATE_FORMAT(p.payment_date,'%Y-%m') m, 0, p.amount FROM invoice_payments p WHERE " . self::CLEARED . ' AND p.payment_date BETWEEN :f2 AND :t2
-                 ) x GROUP BY m ORDER BY m',
-                ['f1' => $from, 't1' => $to, 'f2' => $from, 't2' => $to]
-            ),
-            'metal_making' => Database::fetchAll(
+        $invoiceAmountSql = GstVisibility::invoiceAmountSql('invoices', $gstVisibleOnly);
+        $invoiceBalanceSql = GstVisibility::invoiceBalanceSql('invoices', $gstVisibleOnly);
+        $invoiceVisibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::invoiceVisibleSql('invoices') : '';
+        $paymentAmountSql = GstVisibility::paymentAmountSql('p', $gstVisibleOnly);
+        $paymentVisibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::paymentVisibleSql('p') : '';
+        $metalMaking = $gstVisibleOnly
+            ? Database::fetchAll(
+                "SELECT DATE_FORMAT(i.invoice_date,'%Y-%m') AS month,
+                        COALESCE(SUM(ii.metal_value),0) AS metal,
+                        COALESCE(SUM(ii.making_charge),0) AS making,
+                        0 AS old_metal
+                 FROM invoice_items ii
+                 JOIN invoices i ON i.id = ii.invoice_id
+                 WHERE i.status = 'final'
+                   AND i.invoice_date BETWEEN :from AND :to
+                   AND " . GstVisibility::lineVisibleSql('ii') . "
+                 GROUP BY month ORDER BY month",
+                ['from' => $from, 'to' => $to]
+            )
+            : Database::fetchAll(
                 "SELECT DATE_FORMAT(invoice_date,'%Y-%m') AS month,
                         COALESCE(SUM(metal_total),0) AS metal, COALESCE(SUM(making_total),0) AS making,
                         COALESCE(SUM(old_metal_value),0) AS old_metal
                  FROM invoices WHERE status = 'final' AND invoice_date BETWEEN :from AND :to
                  GROUP BY month ORDER BY month",
                 ['from' => $from, 'to' => $to]
+            );
+
+        return [
+            'trend' => Database::fetchAll(
+                "SELECT m, SUM(billed) billed, SUM(collected) collected FROM (
+                    SELECT DATE_FORMAT(invoice_date,'%Y-%m') m, {$invoiceAmountSql} billed, 0 collected FROM invoices WHERE status = 'final' AND invoice_date BETWEEN :f1 AND :t1{$invoiceVisibilitySql}
+                    UNION ALL
+                    SELECT DATE_FORMAT(p.payment_date,'%Y-%m') m, 0, {$paymentAmountSql} FROM invoice_payments p WHERE " . self::CLEARED . " AND p.payment_date BETWEEN :f2 AND :t2{$paymentVisibilitySql}
+                 ) x GROUP BY m ORDER BY m",
+                ['f1' => $from, 't1' => $to, 'f2' => $from, 't2' => $to]
             ),
+            'metal_making' => $metalMaking,
             'aging' => Database::fetchOne(
                 "SELECT
-                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), COALESCE(due_date, invoice_date)) <= 30 THEN grand_total - paid_amount ELSE 0 END),0) AS d0_30,
-                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), COALESCE(due_date, invoice_date)) BETWEEN 31 AND 60 THEN grand_total - paid_amount ELSE 0 END),0) AS d31_60,
-                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), COALESCE(due_date, invoice_date)) BETWEEN 61 AND 90 THEN grand_total - paid_amount ELSE 0 END),0) AS d61_90,
-                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), COALESCE(due_date, invoice_date)) > 90 THEN grand_total - paid_amount ELSE 0 END),0) AS d90p
-                 FROM invoices WHERE " . self::UNSETTLED
+                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), COALESCE(due_date, invoice_date)) <= 30 THEN {$invoiceBalanceSql} ELSE 0 END),0) AS d0_30,
+                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), COALESCE(due_date, invoice_date)) BETWEEN 31 AND 60 THEN {$invoiceBalanceSql} ELSE 0 END),0) AS d31_60,
+                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), COALESCE(due_date, invoice_date)) BETWEEN 61 AND 90 THEN {$invoiceBalanceSql} ELSE 0 END),0) AS d61_90,
+                    COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), COALESCE(due_date, invoice_date)) > 90 THEN {$invoiceBalanceSql} ELSE 0 END),0) AS d90p
+                 FROM invoices WHERE status = 'final' AND {$invoiceBalanceSql} > 0.01{$invoiceVisibilitySql}"
             ),
             'by_mode' => Database::fetchAll(
-                "SELECT p.payment_mode AS mode, SUM(p.amount) AS total FROM invoice_payments p
-                 WHERE " . self::CLEARED . ' AND p.payment_date BETWEEN :from AND :to GROUP BY p.payment_mode ORDER BY total DESC',
+                "SELECT p.payment_mode AS mode, SUM({$paymentAmountSql}) AS total FROM invoice_payments p
+                 WHERE " . self::CLEARED . " AND p.payment_date BETWEEN :from AND :to{$paymentVisibilitySql} GROUP BY p.payment_mode HAVING total > 0 ORDER BY total DESC",
                 ['from' => $from, 'to' => $to]
             ),
             'top_customers' => Database::fetchAll(
-                "SELECT c.name, SUM(p.amount) AS revenue FROM invoice_payments p
+                "SELECT c.name, SUM({$paymentAmountSql}) AS revenue FROM invoice_payments p
                  LEFT JOIN invoices i ON i.id = p.invoice_id
                  JOIN customers c ON c.id = COALESCE(p.customer_id, i.customer_id)
-                 WHERE " . self::CLEARED . ' AND p.payment_date BETWEEN :from AND :to GROUP BY c.id ORDER BY revenue DESC LIMIT 10',
+                 WHERE " . self::CLEARED . " AND p.payment_date BETWEEN :from AND :to{$paymentVisibilitySql} GROUP BY c.id HAVING revenue > 0 ORDER BY revenue DESC LIMIT 10",
                 ['from' => $from, 'to' => $to]
             ),
             'tax_summary' => Database::fetchAll(
@@ -65,21 +87,23 @@ final class ReportsRepository
                         SUM(ii.tax_amount) AS tax, SUM(ii.cgst) AS cgst, SUM(ii.sgst) AS sgst, SUM(ii.igst) AS igst
                  FROM invoice_items ii
                  JOIN invoices i ON i.id = ii.invoice_id WHERE i.status = 'final' AND i.invoice_date BETWEEN :from AND :to
-                 AND ii.tax_rate > 0 GROUP BY ii.tax_rate ORDER BY ii.tax_rate",
+                 AND ii.tax_rate > 0" . ($gstVisibleOnly ? ' AND ' . GstVisibility::lineVisibleSql('ii') : '') . ' GROUP BY ii.tax_rate ORDER BY ii.tax_rate',
                 ['from' => $from, 'to' => $to]
             ),
         ];
     }
 
     // ---------------------------------------------------------------- Tab 2: Expenses / P&L
-    public static function expenses(string $from, string $to): array
+    public static function expenses(string $from, string $to, bool $gstVisibleOnly = false): array
     {
+        $paymentAmountSql = GstVisibility::paymentAmountSql('p', $gstVisibleOnly);
+        $paymentVisibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::paymentVisibleSql('p') : '';
         $pl = Database::fetchAll(
             "SELECT m, SUM(revenue) revenue, SUM(expense) expense FROM (
-                SELECT DATE_FORMAT(p.payment_date,'%Y-%m') m, p.amount revenue, 0 expense FROM invoice_payments p WHERE " . self::CLEARED . ' AND p.payment_date BETWEEN :f1 AND :t1
+                SELECT DATE_FORMAT(p.payment_date,'%Y-%m') m, {$paymentAmountSql} revenue, 0 expense FROM invoice_payments p WHERE " . self::CLEARED . " AND p.payment_date BETWEEN :f1 AND :t1{$paymentVisibilitySql}
                 UNION ALL
-                SELECT DATE_FORMAT(expense_date,\'%Y-%m\') m, 0, amount FROM expenses WHERE expense_date BETWEEN :f2 AND :t2
-             ) x GROUP BY m ORDER BY m',
+                SELECT DATE_FORMAT(expense_date,'%Y-%m') m, 0, amount FROM expenses WHERE expense_date BETWEEN :f2 AND :t2
+             ) x GROUP BY m ORDER BY m",
             ['f1' => $from, 't1' => $to, 'f2' => $from, 't2' => $to]
         );
         return [
@@ -95,7 +119,7 @@ final class ReportsRepository
             ),
             'totals' => Database::fetchOne(
                 "SELECT
-                    (SELECT COALESCE(SUM(p.amount),0) FROM invoice_payments p WHERE " . self::CLEARED . " AND p.payment_date BETWEEN :f AND :t) AS revenue,
+                    (SELECT COALESCE(SUM({$paymentAmountSql}),0) FROM invoice_payments p WHERE " . self::CLEARED . " AND p.payment_date BETWEEN :f AND :t{$paymentVisibilitySql}) AS revenue,
                     (SELECT COALESCE(SUM(amount),0) FROM expenses WHERE expense_date BETWEEN :f2 AND :t2) AS expense",
                 ['f' => $from, 't' => $to, 'f2' => $from, 't2' => $to]
             ),
@@ -104,16 +128,19 @@ final class ReportsRepository
 
     // ---------------------------------------------------------------- Tab 3: Customers
     // $withRevenue: only true when the caller also holds invoices.read (revenue is invoice money).
-    public static function customers(string $from, string $to, bool $withRevenue = false): array
+    public static function customers(string $from, string $to, bool $withRevenue = false, bool $gstVisibleOnly = false): array
     {
+        $invoiceVisibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::invoiceVisibleSql('i') : '';
+        $paymentAmountSql = GstVisibility::paymentAmountSql('p', $gstVisibleOnly);
+        $paymentVisibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::paymentVisibleSql('p') : '';
         $topCustomers = $withRevenue
             ? Database::fetchAll(
                 "SELECT c.name,
                         COALESCE((SELECT COUNT(*) FROM invoices i WHERE i.customer_id = c.id AND i.status = 'final'
-                                  AND i.invoice_date BETWEEN :f1 AND :t1),0) AS bills,
-                        COALESCE((SELECT SUM(p.amount) FROM invoice_payments p LEFT JOIN invoices i ON i.id = p.invoice_id
+                                  AND i.invoice_date BETWEEN :f1 AND :t1{$invoiceVisibilitySql}),0) AS bills,
+                        COALESCE((SELECT SUM({$paymentAmountSql}) FROM invoice_payments p LEFT JOIN invoices i ON i.id = p.invoice_id
                                   WHERE COALESCE(p.customer_id, i.customer_id) = c.id
-                                    AND p.payment_date BETWEEN :f2 AND :t2 AND " . self::CLEARED . "),0) AS revenue
+                                    AND p.payment_date BETWEEN :f2 AND :t2 AND " . self::CLEARED . "{$paymentVisibilitySql}),0) AS revenue
                  FROM customers c
                  ORDER BY revenue DESC, bills DESC LIMIT 10",
                 ['f1' => $from, 't1' => $to, 'f2' => $from, 't2' => $to]
@@ -121,7 +148,7 @@ final class ReportsRepository
             : Database::fetchAll(
                 "SELECT c.name,
                         COALESCE((SELECT COUNT(*) FROM invoices i WHERE i.customer_id = c.id AND i.status = 'final'
-                                  AND i.invoice_date BETWEEN :f1 AND :t1),0) AS bills,
+                                  AND i.invoice_date BETWEEN :f1 AND :t1{$invoiceVisibilitySql}),0) AS bills,
                         0 AS revenue
                  FROM customers c
                  ORDER BY bills DESC LIMIT 10",
@@ -142,8 +169,9 @@ final class ReportsRepository
     }
 
     // ---------------------------------------------------------------- Tab 4: Inventory
-    public static function inventory(string $from, string $to): array
+    public static function inventory(string $from, string $to, bool $gstVisibleOnly = false): array
     {
+        $movementVisibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::stockMovementVisibleSql('inventory_transactions') : '';
         return [
             'valuation' => Database::fetchAll(
                 "SELECT item_type, COALESCE(SUM(current_stock * avg_cost),0) AS value, COUNT(*) AS items
@@ -162,7 +190,7 @@ final class ReportsRepository
                 "SELECT DATE_FORMAT(created_at,'%Y-%m') AS month,
                         COALESCE(SUM(CASE WHEN type='in' THEN 1 ELSE -1 END * CASE WHEN value > 0 THEN value ELSE qty*unit_cost END),0) AS net_value,
                         COALESCE(SUM(CASE WHEN type='in' THEN 1 ELSE -1 END * weight),0) AS net_weight
-                 FROM inventory_transactions WHERE created_at BETWEEN :from AND :to
+                 FROM inventory_transactions WHERE created_at BETWEEN :from AND :to{$movementVisibilitySql}
                  GROUP BY month ORDER BY month",
                 ['from' => $from . ' 00:00:00', 'to' => $to . ' 23:59:59']
             ),

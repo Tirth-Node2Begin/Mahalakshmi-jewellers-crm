@@ -32,7 +32,33 @@ interface Permission {
   id: number;
   resource: string;
   action: string;
+  /** plain-language label seeded in database/seed.php */
+  description: string | null;
 }
+
+/** Section headings on the grants dialog — the raw resource key is not for staff. */
+const RESOURCE_LABEL: Record<string, string> = {
+  dashboard: "Dashboard",
+  reports: "Reports",
+  customers: "Customers",
+  invoices: "Billing",
+  estimates: "Estimates",
+  payments: "Payments",
+  purchases: "Purchases",
+  expenses: "Expenses",
+  bank_accounts: "Bank accounts",
+  inventory: "Stock & items",
+  rates: "Gold & silver rates",
+  vendors: "Vendors",
+  accounting: "Accounts",
+  users: "Users",
+  rbac: "Roles & permissions",
+  settings: "Shop settings",
+  audit: "Audit log",
+};
+
+const resourceLabel = (resource: string) =>
+  RESOURCE_LABEL[resource] ?? resource.replace(/_/g, " ");
 
 const roleSchema = z.object({
   name: z.string().min(2, "At least 2 characters.").max(60),
@@ -356,7 +382,7 @@ function GrantsDialog({
               onClick={() => toggleGroup(perms)}
               className="mb-2 text-xs font-semibold uppercase tracking-[0.4px] text-muted-foreground hover:text-primary-strong"
             >
-              {resource} · toggle all
+              {resourceLabel(resource)} · toggle all
             </button>
             <div className="flex flex-wrap gap-2">
               {perms.map((perm) => (
@@ -365,6 +391,8 @@ function GrantsDialog({
                   type="button"
                   onClick={() => toggle(perm.id)}
                   aria-pressed={selected.has(perm.id)}
+                  // the raw code stays available on hover for whoever needs it
+                  title={`${perm.resource}.${perm.action}`}
                   className={cn(
                     "rounded-pill px-4 py-2 text-xs font-medium transition-colors",
                     selected.has(perm.id)
@@ -372,7 +400,7 @@ function GrantsDialog({
                       : "border border-border text-muted-foreground hover:bg-background",
                   )}
                 >
-                  {perm.action}
+                  {perm.description ?? perm.action}
                 </button>
               ))}
             </div>

@@ -11,6 +11,9 @@ export interface VendorPayment {
   amount: string;
   ref_no: string | null;
   status: "active" | "cancelled";
+  supplier_id: number;
+  /** null when the payment was made on account rather than against one bill */
+  purchase_id: number | null;
   vendor_name: string;
   purchase_no: string | null;
   account_name: string | null;
@@ -39,6 +42,7 @@ export interface DuePurchase {
 }
 
 export interface LedgerEntry {
+  entry_id: number;
   voucher_id: number;
   voucher_no: string;
   vdate: string;
@@ -46,6 +50,9 @@ export interface LedgerEntry {
   ref_type: string | null;
   ref_id: number | null;
   narration: string | null;
+  /** the other side of the entry, prefixed "To …" (debit) or "By …" (credit) */
+  particulars: string;
+  contra: { name: string; amount: number; side: "dr" | "cr" }[];
   dr_amount: string;
   cr_amount: string;
   balance: number;
@@ -57,6 +64,8 @@ export interface LedgerStatement {
   opening: number;
   opening_type: "dr" | "cr";
   entries: LedgerEntry[];
+  total_debit: number;
+  total_credit: number;
   closing: number;
   closing_type: "dr" | "cr";
 }

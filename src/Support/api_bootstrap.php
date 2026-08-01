@@ -46,6 +46,15 @@ set_exception_handler(static function (\Throwable $e): void {
     if ($e instanceof \DomainException) {
         Response::error('CONFLICT', $e->getMessage(), 409);
     }
+    // PDOException extends RuntimeException, so it must be handled BEFORE the
+    // RuntimeException arm below — otherwise a driver failure (server down, bad
+    // credentials, SQL error) is reported to the browser as a 400 with the raw
+    // SQLSTATE text, which is both wrong (it is not the caller's fault) and a
+    // leak of schema/connection internals.
+    if ($e instanceof \PDOException) {
+        error_log('[jewellers-crm] ' . $e::class . ': ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
+        Response::error('INTERNAL_ERROR', 'Something went wrong. Please try again.', 500);
+    }
     if ($e instanceof \RuntimeException) {
         Response::error('BAD_REQUEST', $e->getMessage(), 400);
     }

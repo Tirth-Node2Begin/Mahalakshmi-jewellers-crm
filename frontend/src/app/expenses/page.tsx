@@ -13,7 +13,7 @@ import { Select } from "@/shared/ui/select";
 import { SkeletonRows } from "@/shared/ui/skeleton";
 import { formatCurrency, formatDate, localDateString, addDaysStr } from "@/shared/utils/format";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChartPie, ChevronLeft, ChevronRight, Layers, Pencil, Plus, Trash2, Wallet } from "lucide-react";
+import { CalendarCheck, ChartPie, ChevronLeft, ChevronRight, Layers, Pencil, Plus, Trash2, Wallet } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -110,6 +110,11 @@ export default function ExpensesPage() {
 
           <div className="ml-auto flex items-center gap-3">
             <span className="text-sm font-semibold text-foreground tabular-nums">{formatCurrency(dayTotal)}</span>
+            {/* rent/salary-style recurring costs live in their own tracker — give
+                them a road from here, not only from the sidebar */}
+            <Link href="/expenses/monthly" className="text-sm font-medium text-primary-strong hover:underline">
+              <CalendarCheck className="mr-1 inline h-4 w-4" aria-hidden /> Fixed costs
+            </Link>
             <Link href="/expenses/insights" className="text-sm font-medium text-primary-strong hover:underline">
               <ChartPie className="mr-1 inline h-4 w-4" aria-hidden /> Insights
             </Link>

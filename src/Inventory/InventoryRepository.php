@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CRM\Inventory;
 
 use CRM\Database\Database;
+use CRM\Support\GstVisibility;
 
 /** Inventory reads + aggregations (planning/11). All prepared statements. */
 final class InventoryRepository
@@ -85,7 +86,7 @@ final class InventoryRepository
     }
 
     /** Item detail: header + recent ledger + 12-month in/out series. */
-    public static function detail(int $id): ?array
+    public static function detail(int $id, bool $gstVisibleOnly = false): ?array
     {
         $item = Database::fetchOne(
             "SELECT i.*, c.name AS category_name, u.short_name AS unit, u.name AS unit_name, v.name AS vendor_name,
@@ -103,22 +104,27 @@ final class InventoryRepository
         if ($item === null) {
             return null;
         }
+        $visibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::stockMovementVisibleSql('t') : '';
         $transactions = Database::fetchAll(
             "SELECT t.*, ROUND(t.qty * t.unit_cost, 2) AS value,
                     inv.invoice_no, us.full_name AS by_name
              FROM inventory_transactions t
              LEFT JOIN invoices inv ON inv.id = t.invoice_id
              LEFT JOIN users us ON us.id = t.created_by
-             WHERE t.item_id = :id
+             WHERE t.item_id = :id{$visibilitySql}
              ORDER BY t.id DESC LIMIT 50",
             ['id' => $id]
         );
+        if ($gstVisibleOnly) {
+            $transactions = GstVisibility::projectHiddenSaleStockOut($transactions, '1000-01-01', '9999-12-31', $id);
+        }
+        $monthlyVisibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::stockMovementVisibleSql('inventory_transactions') : '';
         $movement = Database::fetchAll(
             "SELECT DATE_FORMAT(created_at, '%Y-%m') AS month,
                     COALESCE(SUM(CASE WHEN type = 'in' THEN qty END), 0) AS in_qty,
                     COALESCE(SUM(CASE WHEN type = 'out' THEN qty END), 0) AS out_qty
              FROM inventory_transactions
-             WHERE item_id = :id AND created_at >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+             WHERE item_id = :id AND created_at >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH){$monthlyVisibilitySql}
              GROUP BY month ORDER BY month",
             ['id' => $id]
         );

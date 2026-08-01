@@ -1,5 +1,6 @@
 "use client";
 
+import { usePageHeader } from "@/components/shell/page-header";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { EmptyState } from "@/shared/ui/empty-state";
@@ -8,32 +9,47 @@ import { SkeletonCard } from "@/shared/ui/skeleton";
 import { cn } from "@/shared/utils/cn";
 import { formatDate } from "@/shared/utils/format";
 import type { LucideIcon } from "lucide-react";
-import { Download, Printer } from "lucide-react";
+import { ArrowLeft, Download, Printer } from "lucide-react";
+import Link from "next/link";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
 import { RANGE_PRESETS, activePreset } from "./report-utils";
 
 /**
- * The chrome every financial report shares: a title, date controls, Print and
- * Download CSV. Everything here is `print:hidden` — only the sheet below it
- * (see PrintSheet) reaches the paper.
+ * The chrome every financial report shares: a way back, date controls, Print and
+ * Download CSV. Everything here is `print:hidden` — only the sheet below it (see
+ * PrintSheet) reaches the paper.
+ *
+ * The title/subtitle are pushed to the shell header rather than printed here, so
+ * a report shows one heading like every other screen.
  */
 export function ReportToolbar({
   title,
   subtitle,
+  backHref = "/reports",
+  backLabel = "Reports",
   children,
 }: {
   title: string;
   subtitle: string;
+  /** Where the back arrow goes. Defaults to the reports hub. */
+  backHref?: string;
+  backLabel?: string;
   children: ReactNode;
 }) {
+  usePageHeader(title, subtitle);
+
   return (
-    <div className="flex flex-wrap items-end gap-3 print:hidden">
-      <div>
-        <h1 className="text-2xl font-semibold text-foreground">{title}</h1>
-        <p className="text-sm text-muted-foreground">{subtitle}</p>
+    <div className="space-y-3 print:hidden">
+      <Link
+        href={backHref}
+        className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition-colors hover:text-primary-strong"
+      >
+        <ArrowLeft className="h-4 w-4" aria-hidden /> Back to {backLabel}
+      </Link>
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="ml-auto flex flex-wrap items-end gap-2">{children}</div>
       </div>
-      <div className="ml-auto flex flex-wrap items-end gap-2">{children}</div>
     </div>
   );
 }

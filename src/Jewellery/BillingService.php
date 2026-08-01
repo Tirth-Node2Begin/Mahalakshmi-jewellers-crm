@@ -168,7 +168,7 @@ final class BillingService
                 );
 
                 $cogsTotal += $cost;
-                $metal = (string) ($item['metal'] ?? 'gold');
+                $metal = Metals::normalise($item['metal'] ?? null);
                 $inventoryCredits[$metal] = ($inventoryCredits[$metal] ?? 0) + $cost;
             }
 
@@ -398,13 +398,13 @@ final class BillingService
     private static function metalOfLine(array $line): string
     {
         if ($line['inventory_item_id'] === null) {
-            return 'gold';
+            return Metals::GOLD;
         }
         $metal = Database::fetchValue(
             'SELECT metal FROM inventory_items WHERE id = :id',
             ['id' => $line['inventory_item_id']]
         );
-        return $metal === 'silver' ? 'silver' : 'gold';
+        return Metals::normalise($metal);
     }
 
     /** The bulk SKU that holds old metal of a given metal+purity (created on demand). */

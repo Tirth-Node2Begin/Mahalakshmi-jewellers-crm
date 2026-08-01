@@ -14,7 +14,9 @@ SET FOREIGN_KEY_CHECKS = 0;
 
 CREATE TABLE users (
   id INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  username VARCHAR(60) NOT NULL,
+  -- utf8mb4_bin: usernames are case-SENSITIVE, so `admin` and `Admin` are two
+  -- distinct accounts. This also makes uq_users_username case-sensitive.
+  username VARCHAR(60) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
   full_name VARCHAR(120) NOT NULL,
   email VARCHAR(150) NULL,

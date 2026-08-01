@@ -2,7 +2,8 @@ import { api } from "@/shared/api/http-client";
 
 /** Metal rates per gram, per purity, per day (api/rates.php + src/Jewellery/RateService.php). */
 
-export type Metal = "gold" | "silver";
+/** A metal code from the master — see `metalLabel()` in features/stock/api. */
+export type Metal = string;
 
 export interface Purity {
   id: number;
@@ -30,11 +31,6 @@ export interface RatesResponse {
   /** last 30 days, newest first */
   history: RateHistoryRow[];
 }
-
-export const METAL_LABEL: Record<Metal, string> = {
-  gold: "Gold",
-  silver: "Silver",
-};
 
 /** Stable key for a purity across `purities` and `history` (history has no purity_id). */
 export const purityKey = (metal: string, code: string) => `${metal}:${code}`;

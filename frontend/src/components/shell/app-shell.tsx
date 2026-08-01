@@ -8,6 +8,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, type ReactNode } from "react";
 import { ForcedPasswordChange } from "./forced-password-change";
 import { Header } from "./header";
+import { PageHeaderProvider } from "./page-header";
 import { Sidebar } from "./sidebar";
 
 /**
@@ -42,11 +43,15 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
   }, [isAuthenticated, isLoading, isLoginPage, navLoading, pathname, routeIsAllowed, router]);
 
-  if (isLoginPage) {
+  // Show the login form only once we know there is no session. While the session
+  // probe is in flight — or while an authenticated visitor is being sent on to the
+  // dashboard — hold the splash, otherwise the login card flashes before the
+  // redirect lands.
+  if (isLoginPage && !isLoading && !isAuthenticated) {
     return <>{children}</>;
   }
 
-  if (isLoading || !isAuthenticated) {
+  if (isLoading || !isAuthenticated || isLoginPage) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-4">
@@ -67,8 +72,10 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="min-h-screen bg-background">
       <Sidebar />
       <div className="mx-auto max-w-[1440px] px-6 pb-24 md:pb-10 md:pl-[136px] md:pr-10">
-        <Header />
-        <main>{children}</main>
+        <PageHeaderProvider>
+          <Header />
+          <main>{children}</main>
+        </PageHeaderProvider>
       </div>
     </div>
   );

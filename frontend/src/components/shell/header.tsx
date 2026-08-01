@@ -10,33 +10,58 @@ import { useTheme } from "next-themes";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { usePageHeaderOverride } from "./page-header";
 
-const PAGE_TITLES: Array<[RegExp, string]> = [
+/**
+ * The heading for every static route: [path, title, subtitle?]. First match wins,
+ * so deeper paths come before their parents.
+ *
+ * This is the only place a page title is written. Pages do NOT render their own
+ * <h1> — one heading per screen (see page-header.tsx). Data-driven headings
+ * (a ledger name, a report name) override this via usePageHeader().
+ */
+const PAGE_TITLES: Array<[RegExp, string, string?]> = [
   [/^\/$/, "Dashboard"],
-  [/^\/rates/, "Today's Rates"],
+  [/^\/rates/, "Today's Rates", "Rate per gram used for new bills."],
+  [/^\/customers\/detail/, "Customer"],
   [/^\/customers/, "Customers"],
-  [/^\/estimates/, "Estimates"],
+  [/^\/estimates\/create/, "New Estimate", "Nothing is sold and no stock moves until this becomes a bill."],
+  [/^\/estimates\/detail/, "Estimate"],
+  [/^\/estimates/, "Estimates", "A price slip for the customer — nothing is sold until it becomes a bill."],
+  [/^\/invoices\/create/, "New Bill"],
+  [/^\/invoices\/detail/, "Bill"],
   [/^\/invoices/, "Bills"],
   [/^\/payments/, "Payments"],
+  [/^\/purchases\/create/, "New Purchase", "Record what you bought — it goes straight into your stock."],
+  [/^\/purchases\/detail/, "Purchase"],
   [/^\/purchases/, "Purchases"],
-  [/^\/accounting/, "Accounts"],
+  [/^\/accounting\/ledger/, "Ledger"],
+  [/^\/accounting/, "Accounts", "Chart of accounts and ledger statements."],
   [/^\/vendors\/payments/, "Vendor Payments"],
+  [/^\/vendors\/detail/, "Supplier"],
   [/^\/vendors/, "Suppliers & Makers"],
   [/^\/expenses\/insights/, "Expense Insights"],
   [/^\/expenses\/monthly/, "Fixed Costs"],
   [/^\/expenses\/categories/, "Expense Categories"],
   [/^\/expenses/, "Expenses"],
   [/^\/inventory\/items/, "Items"],
+  [/^\/inventory\/detail/, "Item"],
   [/^\/inventory\/movements/, "Stock Movements"],
-  [/^\/inventory\/adjust/, "Stock Adjustment"],
-  [/^\/inventory/, "Inventory"],
+  [
+    /^\/inventory\/adjust/,
+    "Correct Stock",
+    "Use this only when the shelf and the computer disagree — every correction is signed with your name and reason.",
+  ],
+  [/^\/inventory/, "Stock in Hand", "Everything on the shelf right now, metal by metal."],
   [/^\/reports\/pnl/, "Profit & Loss"],
   [/^\/reports/, "Reports"],
   [/^\/notifications/, "Notifications"],
   [/^\/profile/, "My Profile"],
   [/^\/settings\/users/, "Users"],
   [/^\/settings\/roles/, "Roles & Permissions"],
-  [/^\/settings\/audit/, "Audit Log"],
+  [/^\/settings\/audit/, "Audit Log", "Everything staff changed, and when."],
+  [/^\/settings\/company/, "Company Profile"],
+  [/^\/settings\/bank-accounts/, "Bank Accounts"],
   [/^\/settings/, "Settings"],
 ];
 
@@ -46,6 +71,7 @@ export function Header() {
   // trailingSlash:true → normalise "/invoices/" to "/invoices" so the anchored
   // PAGE_TITLES regexes and the "/" dashboard check still match.
   const pathname = (usePathname() ?? "/").replace(/\/+$/, "") || "/";
+  const override = usePageHeaderOverride();
   const [menuOpen, setMenuOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -68,14 +94,16 @@ export function Header() {
     refetchInterval: 60_000,
   });
 
-  const title = PAGE_TITLES.find(([re]) => re.test(pathname))?.[1] ?? "Mahalakshmi Jewellers";
+  const route = PAGE_TITLES.find(([re]) => re.test(pathname));
+  const title = override?.title ?? route?.[1] ?? "Mahalakshmi Jewellers";
+  const subtitle = override?.title ? override.subtitle : route?.[2];
   const unread = notif?.unread_count ?? 0;
   const isDashboard = pathname === "/";
   const firstName = user?.full_name?.split(" ")[0] ?? "";
 
   return (
-    <header className="flex items-center justify-between gap-4 py-8">
-      <div>
+    <header className="flex items-start justify-between gap-4 py-8">
+      <div className="min-w-0">
         {isDashboard && firstName ? (
           <p className="text-xs font-medium tracking-[0.4px] text-muted-foreground">
             Welcome back, <span className="font-semibold text-foreground">{firstName}</span>
@@ -85,10 +113,11 @@ export function Header() {
             Mahalakshmi Jewellers CRM
           </p>
         )}
-        <h1 className="text-[28px] font-bold leading-9 text-foreground">{title}</h1>
+        <h1 className="truncate text-[28px] font-bold leading-9 text-foreground">{title}</h1>
+        {subtitle ? <p className="mt-0.5 text-sm text-muted-foreground">{subtitle}</p> : null}
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex shrink-0 items-center gap-3">
         {mounted ? (
           <button
             onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}

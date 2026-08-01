@@ -17,13 +17,16 @@ use CRM\Accounting\VoucherService;
 use CRM\Core\Request;
 use CRM\Core\Response;
 use CRM\Database\Database;
+use CRM\Jewellery\Metals;
 use CRM\Jewellery\RateService;
 use CRM\Jewellery\StockService;
 use CRM\Support\Audit;
+use CRM\Support\GstVisibility;
 use CRM\Support\NumberSequence;
 use CRM\Validation\Validator;
 
 $user = requireApiAuth();
+$gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
 $canSeeCost = checkPermission('reports.stock') || checkPermission('accounting.read');
 
 if (Request::method() === 'GET') {
@@ -54,16 +57,20 @@ if (Request::method() === 'GET') {
             unset($item['avg_cost']);
         }
         $item['availability'] = StockService::availability($id);
+        $movementVisibilitySql = $gstVisibleOnly ? ' AND ' . GstVisibility::stockMovementVisibleSql('t') : '';
         $item['movements'] = Database::fetchAll(
-            "SELECT t.id, t.created_at, t.type, t.reason, t.qty, t.weight, t.rate_per_gram,
+            "SELECT t.id, t.item_id, t.created_at, t.type, t.reason, t.qty, t.weight, t.rate_per_gram,
                     t.adjustment_reason, inv.invoice_no, pur.purchase_no, u.full_name AS user_name
                FROM inventory_transactions t
           LEFT JOIN invoices inv ON inv.id = t.invoice_id
           LEFT JOIN purchases pur ON pur.id = t.purchase_id
           LEFT JOIN users u ON u.id = t.created_by
-              WHERE t.item_id = :id ORDER BY t.id DESC LIMIT 200",
+              WHERE t.item_id = :id{$movementVisibilitySql} ORDER BY t.id DESC LIMIT 200",
             ['id' => $id]
         );
+        if ($gstVisibleOnly) {
+            $item['movements'] = GstVisibility::projectHiddenSaleStockOut($item['movements'], '1000-01-01', '9999-12-31', $id);
+        }
         Response::success(['item' => $item]);
     }
 
@@ -117,7 +124,7 @@ switch ($action) {
         $data = Validator::validate($body, [
             'id' => 'nullable|int|min:1',
             'name' => 'required|string|max:150',
-            'metal' => 'required|in:gold,silver',
+            'metal' => 'required|' . Metals::rule(),
             'purity_id' => 'required|int|min:1',
             'tracking' => 'required|in:tagged,bulk',
             'category_id' => 'nullable|int|min:1',
@@ -191,6 +198,7 @@ switch ($action) {
             'direction' => 'required|in:in,out',
             'qty' => 'nullable|numeric|min:0',
             'weight' => 'required|numeric|min:0.001',
+            'rate_per_gram' => 'nullable|numeric|min:0',
             'reason' => 'required|string|max:255',
         ]);
 
@@ -208,8 +216,15 @@ switch ($action) {
                 throw new RuntimeException('Item not found.');
             }
 
-            $costPerGram = StockService::avgCostPerGram($itemId);
-            $value = round($costPerGram * $weight, 2);
+            $currentCostPerGram = StockService::avgCostPerGram($itemId);
+            $enteredRatePerGram = (float) ($data['rate_per_gram'] ?? 0);
+            $ratePerGram = $direction === 'in'
+                ? ($enteredRatePerGram > 0 ? $enteredRatePerGram : $currentCostPerGram)
+                : ($currentCostPerGram > 0 ? $currentCostPerGram : $enteredRatePerGram);
+            if ($direction === 'in' && $ratePerGram <= 0) {
+                throw new DomainException('Enter rate per gram so this stock has a value.');
+            }
+            $value = round($ratePerGram * $weight, 2);
 
             if ($direction === 'out') {
                 $available = StockService::availability($itemId);
@@ -250,6 +265,7 @@ switch ($action) {
                 qty: $qty,
                 weight: $weight,
                 value: $value,
+                ratePerGram: $ratePerGram > 0 ? $ratePerGram : null,
                 voucherId: $voucherId,
                 notes: 'Adjustment ' . NumberSequence::next('adjustment'),
                 adjustmentReason: (string) $data['reason'],
@@ -263,6 +279,8 @@ switch ($action) {
             Audit::log($user->id, 'stock.adjust', 'inventory_items', $itemId, null, [
                 'direction' => $direction,
                 'weight' => $weight,
+                'rate_per_gram' => $ratePerGram,
+                'value' => $value,
                 'reason' => $data['reason'],
             ]);
         });
@@ -325,6 +343,32 @@ switch ($action) {
         });
 
         Response::success(['message' => 'Opening stock recorded.']);
+
+    case 'delete_item':
+        // only an item the books have never seen can be deleted — anything with
+        // stock, purchase or billing history is part of the record and must be
+        // removed via an adjustment (cancel, never delete)
+        requirePermission('inventory.manage');
+        $data = Validator::validate($body, ['id' => 'required|int|min:1']);
+        $itemId = (int) $data['id'];
+        $item = Database::fetchOne(
+            'SELECT id, item_code, name, tracking, status FROM inventory_items WHERE id = :id',
+            ['id' => $itemId]
+        );
+        if ($item === null) {
+            Response::error('NOT_FOUND', 'Item not found.', 404);
+        }
+        $refs = (int) Database::fetchValue('SELECT COUNT(*) FROM inventory_transactions WHERE item_id = :id', ['id' => $itemId])
+            + (int) Database::fetchValue('SELECT COUNT(*) FROM purchase_items WHERE item_id = :id', ['id' => $itemId])
+            + (int) Database::fetchValue('SELECT COUNT(*) FROM invoice_items WHERE inventory_item_id = :id', ['id' => $itemId]);
+        if ($refs > 0) {
+            throw new DomainException(
+                'This item has stock or billing history, so the books need it. Take its stock out with an adjustment instead of deleting.'
+            );
+        }
+        Database::execute('DELETE FROM inventory_items WHERE id = :id', ['id' => $itemId]);
+        Audit::log($user->id, 'item.delete', 'inventory_items', $itemId, $item, null);
+        Response::success(['message' => 'Item deleted.']);
 
     default:
         Response::error('BAD_REQUEST', 'Unknown action.', 400);

@@ -246,7 +246,7 @@ export function lineToPayload(line: BillLine): Record<string, unknown> {
     making_value: num(line.making_value),
     discount: num(line.discount),
     tax_rate: num(line.tax_rate),
-    tax_treatment: line.tax_treatment,
+    tax_treatment: line.tax_treatment === "taxable" ? "taxable" : "non_gst",
     exempt_reason: line.exempt_reason,
   };
 }

@@ -4,6 +4,7 @@ import { PermissionGate, usePermissions } from "@/lib/permissions";
 import { PARTNER_CATEGORIES, PARTNER_CATEGORY_OF, vendorsApi, VENDOR_TYPE_LABEL, vendorStatusTone, type Vendor } from "@/features/vendors/api";
 import { cn } from "@/shared/utils/cn";
 import { VendorFormModal } from "@/features/vendors/vendor-form-modal";
+import { useVendorTypes } from "@/features/vendors/vendor-type-select";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
@@ -21,6 +22,7 @@ import { useState } from "react";
 
 export default function VendorsPage() {
   const { can } = usePermissions();
+  const { customTypes, labelOf } = useVendorTypes();
   const [category, setCategory] = useState("");
   const [type, setType] = useState("");
   const [status, setStatus] = useState("");
@@ -84,6 +86,15 @@ export default function VendorsPage() {
                 ))}
               </optgroup>
             ))}
+            {customTypes.length ? (
+              <optgroup label="Your types">
+                {customTypes.map((t) => (
+                  <option key={t.slug} value={t.slug}>
+                    {t.label}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
           </Select>
           <Select value={status} onChange={(e) => setStatus(e.target.value)} className="h-10 w-auto">
             <option value="">All statuses</option>
@@ -116,23 +127,36 @@ export default function VendorsPage() {
           <>
             <ul>
               {pageItems.map((v) => (
-                <li key={v.id} className="flex flex-wrap items-center gap-4 border-b border-border/60 px-4 py-4 last:border-0">
-                  <div className="min-w-0 flex-1">
-                    <Link href={`/vendors/detail?id=${v.id}`} className="truncate text-sm font-semibold text-foreground hover:text-primary-strong">
-                      {v.name}
-                    </Link>
+                <li
+                  key={v.id}
+                  className="relative flex flex-wrap items-center gap-4 border-b border-border/60 px-4 py-4 transition-colors last:border-0 hover:bg-background"
+                >
+                  {/* whole row opens the profile; the buttons below sit above this overlay */}
+                  <Link
+                    href={`/vendors/detail?id=${v.id}`}
+                    aria-label={`Open ${v.name}`}
+                    className="absolute inset-0 z-0 rounded-input focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary"
+                  />
+                  <div className="pointer-events-none min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold text-foreground">{v.name}</p>
                     <p className="truncate text-xs text-muted-foreground">
-                      {VENDOR_TYPE_LABEL[v.vendor_type]}
+                      {labelOf(v.vendor_type)}
                       {v.specialisation ? ` · ${v.specialisation}` : ""}
                       {v.mobile ? ` · ${v.mobile}` : ""}
                     </p>
                   </div>
-                  {v.item_count ? <span className="hidden text-xs text-muted-foreground sm:inline">{v.item_count} items</span> : null}
-                  <Badge tone={vendorStatusTone(v.vendor_status)}>{v.vendor_status}</Badge>
+                  {v.item_count ? (
+                    <span className="pointer-events-none hidden text-xs text-muted-foreground sm:inline">{v.item_count} items</span>
+                  ) : null}
+                  <span className="pointer-events-none">
+                    <Badge tone={vendorStatusTone(v.vendor_status)}>{v.vendor_status}</Badge>
+                  </span>
                   {can("vendors.manage") ? (
                     <Button
                       variant="ghost"
                       size="sm"
+                      className="relative z-10"
+                      aria-label={`Edit ${v.name}`}
                       onClick={() => {
                         setEditing(v);
                         setFormOpen(true);

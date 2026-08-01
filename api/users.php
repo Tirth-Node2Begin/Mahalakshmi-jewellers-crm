@@ -97,7 +97,13 @@ switch ($action) {
         if (!preg_match('/^[a-zA-Z0-9._-]+$/', $data['username'])) {
             Response::error('VALIDATION_ERROR', 'Validation failed.', 422, ['username' => 'Username may only contain letters, numbers, dots, dashes.']);
         }
-        if (Database::fetchValue('SELECT id FROM users WHERE username = :u', ['u' => $data['username']]) !== null) {
+        // Case-SENSITIVE: `admin` and `Admin` are distinct accounts, so only an
+        // exact-case match is a conflict. COLLATE matches users.username's own
+        // collation, keeping the unique index in play.
+        if (Database::fetchValue(
+            'SELECT id FROM users WHERE username COLLATE utf8mb4_bin = :u',
+            ['u' => $data['username']]
+        ) !== null) {
             Response::error('CONFLICT', 'Username already taken.', 409);
         }
         if ($data['email'] !== null && Database::fetchValue('SELECT id FROM users WHERE email = :e', ['e' => $data['email']]) !== null) {
@@ -188,13 +194,18 @@ switch ($action) {
 
         $newUsername = $data['username'] !== null ? trim((string) $data['username']) : null;
         if ($newUsername === $target['username']) {
+            // `===` is case-sensitive, matching the case-sensitive username rule:
+            // a change of casing alone IS a rename, not a no-op.
             $newUsername = null; // unchanged — not a rename
         }
         if ($newUsername !== null) {
             if (!preg_match('/^[a-zA-Z0-9._-]+$/', $newUsername)) {
                 Response::error('VALIDATION_ERROR', 'Validation failed.', 422, ['username' => 'Username may only contain letters, numbers, dots, dashes.']);
             }
-            if (Database::fetchValue('SELECT id FROM users WHERE username = :u AND id <> :id', ['u' => $newUsername, 'id' => $data['id']]) !== null) {
+            if (Database::fetchValue(
+                'SELECT id FROM users WHERE username COLLATE utf8mb4_bin = :u AND id <> :id',
+                ['u' => $newUsername, 'id' => $data['id']]
+            ) !== null) {
                 Response::error('CONFLICT', 'Username already taken.', 409);
             }
         }

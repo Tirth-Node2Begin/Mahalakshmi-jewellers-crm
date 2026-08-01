@@ -2,7 +2,6 @@
 
 import { accountingApi, NATURE_LABEL, type CoaGroup, type CoaLedger } from "@/features/accounting/api";
 import { JournalDialog } from "@/features/accounting/journal-dialog";
-import { LedgerStatementDialog } from "@/features/accounting/ledger-statement-dialog";
 import { usePermissions } from "@/lib/permissions";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
@@ -15,6 +14,7 @@ import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
 import { formatCurrency, localDateString } from "@/shared/utils/format";
 import { useQuery } from "@tanstack/react-query";
 import { BookOpen, ChevronRight, PencilLine } from "lucide-react";
+import Link from "next/link";
 import { useMemo, useState } from "react";
 
 /** Indian fiscal year: 1 Apr → 31 Mar. */
@@ -31,7 +31,6 @@ export default function AccountingPage() {
   const search = useDebouncedValue(rawSearch, 300);
   const [from, setFrom] = useState(fy.from);
   const [to, setTo] = useState(localDateString());
-  const [openLedger, setOpenLedger] = useState<{ id: number; name: string } | null>(null);
   const [journalOpen, setJournalOpen] = useState(false);
 
   const { data, isLoading, isError } = useQuery({
@@ -61,17 +60,14 @@ export default function AccountingPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Accounts</h1>
-          <p className="text-sm text-muted-foreground">Chart of accounts and ledger statements.</p>
-        </div>
-        {can("accounting.journal") ? (
-          <Button className="ml-auto" onClick={() => setJournalOpen(true)}>
+      {/* Heading lives in the shell header (components/shell/page-header.tsx). */}
+      {can("accounting.journal") ? (
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          <Button onClick={() => setJournalOpen(true)}>
             <PencilLine className="h-4 w-4" aria-hidden /> Journal Entry
           </Button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
 
       <Card className="p-0">
         <div className="flex flex-wrap items-end gap-3 border-b border-border p-4">
@@ -112,25 +108,11 @@ export default function AccountingPage() {
         ) : (
           <div className="space-y-3 p-4">
             {tree.map((group) => (
-              <GroupNode
-                key={`${group.id}-${searching}`}
-                group={group}
-                defaultOpen={searching}
-                onPick={(l) => setOpenLedger({ id: l.id, name: l.name })}
-              />
+              <GroupNode key={`${group.id}-${searching}`} group={group} defaultOpen={searching} range={{ from, to }} />
             ))}
           </div>
         )}
       </Card>
-
-      <LedgerStatementDialog
-        open={openLedger !== null}
-        onClose={() => setOpenLedger(null)}
-        ledgerId={openLedger?.id ?? null}
-        ledgerName={openLedger?.name ?? ""}
-        defaultFrom={from}
-        defaultTo={to}
-      />
 
       {can("accounting.journal") ? (
         <JournalDialog open={journalOpen} onClose={() => setJournalOpen(false)} ledgers={data?.ledgers ?? []} />
@@ -142,24 +124,31 @@ export default function AccountingPage() {
 function GroupNode({
   group,
   defaultOpen,
-  onPick,
+  range,
 }: {
   group: CoaGroup;
   defaultOpen: boolean;
-  onPick: (ledger: CoaLedger) => void;
+  /** Carried into the statement page so it opens on the dates shown here. */
+  range: { from: string; to: string };
 }) {
   const children = group.children ?? [];
   const count = group.ledgers.length + children.reduce((s, c) => s + c.ledgers.length, 0);
 
+  // Top-level groups are already named after their nature ("Assets", "Income"…),
+  // so only show the nature when it adds something the name does not.
+  const nature = NATURE_LABEL[group.nature];
+  const countLabel = `${count} ${count === 1 ? "ledger" : "ledgers"}`;
+  const sameAsName = nature.toLowerCase() === group.name.trim().toLowerCase();
+
   return (
     <Collapsible
       label={group.name}
-      hint={`${NATURE_LABEL[group.nature]} · ${count} ${count === 1 ? "ledger" : "ledgers"}`}
+      hint={sameAsName ? countLabel : `${nature} · ${countLabel}`}
       defaultOpen={defaultOpen}
     >
       <div className="space-y-2">
         {group.ledgers.map((l) => (
-          <LedgerRow key={l.id} ledger={l} onPick={onPick} />
+          <LedgerRow key={l.id} ledger={l} range={range} />
         ))}
         {children.map((child) => (
           <div key={child.id} className="rounded-input border border-border bg-card p-3">
@@ -168,7 +157,7 @@ function GroupNode({
               {child.ledgers.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No ledgers here yet.</p>
               ) : (
-                child.ledgers.map((l) => <LedgerRow key={l.id} ledger={l} onPick={onPick} />)
+                child.ledgers.map((l) => <LedgerRow key={l.id} ledger={l} range={range} />)
               )}
             </div>
           </div>
@@ -179,11 +168,11 @@ function GroupNode({
   );
 }
 
-function LedgerRow({ ledger, onPick }: { ledger: CoaLedger; onPick: (ledger: CoaLedger) => void }) {
+function LedgerRow({ ledger, range }: { ledger: CoaLedger; range: { from: string; to: string } }) {
   const opening = Number(ledger.opening_balance);
   return (
-    <button
-      onClick={() => onPick(ledger)}
+    <Link
+      href={`/accounting/ledger?id=${ledger.id}&from=${range.from}&to=${range.to}`}
       className="flex w-full items-center gap-3 rounded-input px-3 py-2.5 text-left transition-colors hover:bg-background"
     >
       <span className="min-w-0 flex-1">
@@ -197,6 +186,6 @@ function LedgerRow({ ledger, onPick }: { ledger: CoaLedger; onPick: (ledger: Coa
         </span>
       ) : null}
       <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
-    </button>
+    </Link>
   );
 }

@@ -17,7 +17,7 @@ import { z } from "zod";
 import { customersApi } from "./api";
 import type { Customer, FamilyMember, UserOption } from "./types";
 
-const schema = z.object({
+const baseSchema = z.object({
   name: z.string().min(1, "Name is required.").max(150),
   company: z.string().max(150).or(z.literal("")),
   gstin: z.string().max(20).or(z.literal("")),
@@ -36,28 +36,46 @@ const schema = z.object({
   notes: z.string().max(5000).or(z.literal("")),
 });
 
-type FormValues = z.infer<typeof schema>;
+/**
+ * Name is always required (`CustomerService::validate`). Billing additionally
+ * insists on a phone: a bill customer you cannot ring back is not worth the row.
+ * Everything else is optional in both places.
+ */
+const schemaFor = (requireMobile: boolean) =>
+  baseSchema.superRefine((values, ctx) => {
+    if (requireMobile && !values.mobile.trim()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["mobile"], message: "Phone number is required." });
+    }
+  });
+
+type FormValues = z.infer<typeof baseSchema>;
 
 const emptyMember = (): FamilyMember => ({ relation: "", name: "", dob: "", anniversary: "" });
 
 export function CustomerFormModal({
   open,
   onClose,
+  onCreated,
   customer,
   family,
   users,
   title,
+  requireMobile = false,
 }: {
   open: boolean;
   onClose: () => void;
+  /** Fires with the new row after a create — lets billing select what it just added. */
+  onCreated?: (created: { id: number; name: string; mobile: string | null }) => void;
   customer?: Customer | null;
   family?: FamilyMember[];
   users: UserOption[];
   title?: string;
+  /** Billing needs a contact number; the Customers page does not. */
+  requireMobile?: boolean;
 }) {
   const queryClient = useQueryClient();
   const isEdit = !!customer;
-  const form = useForm<FormValues>({ resolver: zodResolver(schema) });
+  const form = useForm<FormValues>({ resolver: zodResolver(schemaFor(requireMobile)) });
   const { register, handleSubmit, reset, setError, formState } = form;
   const [members, setMembers] = useState<FamilyMember[]>([]);
 
@@ -116,9 +134,10 @@ export function CustomerFormModal({
         toast.success("Customer updated.");
         void queryClient.invalidateQueries({ queryKey: ["customers"] });
       } else {
-        await customersApi.create(payload);
+        const created = await customersApi.create(payload);
         toast.success("Customer created.");
         void queryClient.invalidateQueries({ queryKey: ["customers"] });
+        onCreated?.({ id: created.id, name: values.name, mobile: values.mobile || null });
       }
       onClose();
     } catch (e) {
@@ -162,8 +181,11 @@ export function CustomerFormModal({
 
         <div className="grid gap-5 sm:grid-cols-2">
           <div>
-            <Label htmlFor="c_mobile">Mobile</Label>
-            <Input id="c_mobile" {...register("mobile")} />
+            <Label htmlFor="c_mobile" required={requireMobile}>
+              Mobile
+            </Label>
+            <Input id="c_mobile" inputMode="tel" {...register("mobile")} aria-invalid={!!formState.errors.mobile} />
+            <FieldError message={formState.errors.mobile?.message} />
           </div>
           <div>
             <Label htmlFor="c_altmobile">Alternate mobile</Label>

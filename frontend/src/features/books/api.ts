@@ -92,6 +92,50 @@ export interface GstSummary {
   reconciliation: { gst_turnover: number; pnl_income: number; difference: number };
 }
 
+export type LedgerViewMode = "full" | "gst";
+
+export interface LedgerRow {
+  id: number;
+  invoice_no?: string | null;
+  purchase_no?: string | null;
+  invoice_date?: string;
+  purchase_date?: string;
+  party_name: string;
+  tax_treatments: string | null;
+  qty: Numeric;
+  weight: Numeric;
+  taxable_value: Numeric;
+  cgst?: Numeric;
+  sgst?: Numeric;
+  igst?: Numeric;
+  tax_total: Numeric;
+  total: Numeric;
+  is_adjustment?: boolean;
+}
+
+export interface StockBucket {
+  qty: number;
+  weight: number;
+  value: number;
+}
+
+export interface LedgerStock {
+  visible_purchases: StockBucket;
+  visible_sales: StockBucket;
+  excluded_purchases: StockBucket;
+  excluded_sales: StockBucket;
+  other_movements: StockBucket;
+  period_net: StockBucket;
+  live_balance: StockBucket;
+}
+
+export interface LedgerViewReport {
+  view: LedgerViewMode;
+  sales: LedgerRow[];
+  purchases: LedgerRow[];
+  stock: LedgerStock;
+}
+
 export interface StockSummaryRow {
   metal: "gold" | "silver" | string;
   purity: string | null;
@@ -157,6 +201,10 @@ export const booksApi = {
   /** Outward + inward GST with a P&L reconciliation (permission `reports.gst`). */
   gstSummary: (from: string, to: string) =>
     api.get<{ gst: GstSummary }>("books.php", { report: "gst_summary", from, to }),
+
+  /** Full ledger or GST-facing ledger view, depending on permission. */
+  ledgerView: (from: string, to: string, view: LedgerViewMode) =>
+    api.get<{ ledger: LedgerViewReport }>("books.php", { report: "ledger_view", from, to, view }),
 
   /** What customers still owe us, as at a date (permission `reports.outstanding`). */
   customerOutstanding: (to?: string) =>

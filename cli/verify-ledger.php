@@ -122,22 +122,37 @@ foreach (array_slice($statusDrift, 0, 5) as $row) {
 }
 
 // 7. no sale can hide: register = GST turnover = P&L income
+//
+// All three legs are compared on the GST taxable basis. Two discounts exist and
+// they sit on opposite sides of the tax line:
+//   - line discount (invoice_items.discount): pre-tax — Pricing computes
+//     taxable = metal + making − discount, and gstSummary already nets it;
+//   - bill discount (invoices.discount_total): a post-tax rebate — the grand
+//     total drops but GST was charged on the full value, so turnover keeps it
+//     (it shows in the P&L as the "Discount Given" contra instead).
 $gst = BillingRepository::gstSummary($fy['start'], $fy['end']);
 $pnl = AccountingRepository::profitAndLoss($fy['start'], $fy['end']);
 $register = BillingRepository::salesRegister($fy['start'], $fy['end']);
-$registerTaxable = 0.0;
+$lineDiscounts = (float) Database::fetchValue(
+    "SELECT COALESCE(SUM(ii.discount), 0)
+       FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id
+      WHERE i.status = 'final' AND i.invoice_date BETWEEN :from AND :to",
+    ['from' => $fy['start'], 'to' => $fy['end']]
+);
+$registerTaxable = -$lineDiscounts;
 foreach ($register as $row) {
-    $registerTaxable += (float) $row['metal_total'] + (float) $row['making_total'] - (float) $row['discount_total'];
+    $registerTaxable += (float) $row['metal_total'] + (float) $row['making_total'];
 }
 report(
     'sales register total = GST outward turnover',
     abs($registerTaxable - $gst['total_turnover']) < 1.0,
     sprintf('register %.2f vs GST %.2f', $registerTaxable, $gst['total_turnover'])
 );
-// round-off is other income, not turnover — exclude it from the comparison
+// round-off is other income, not turnover; the discount contra is the post-tax
+// rebate turnover rightly keeps (see above) — exclude both from the comparison
 $salesIncome = 0.0;
 foreach ($pnl['income'] as $line) {
-    if (($line['linked_type'] ?? null) !== 'round_off') {
+    if (!in_array($line['linked_type'] ?? null, ['round_off', 'discount'], true)) {
         $salesIncome += (float) $line['amount'];
     }
 }

@@ -3,11 +3,27 @@
 declare(strict_types=1);
 
 /**
- * Mahalakshmi Jewellers CRM — demo data seeder.
- * Populates every module through the real Service::create() paths so business
- * rules apply and the whole app comes alive (dashboard, lists, reports).
+ * Mahalakshmi Jewellers ERP — demo data seeder.
  *
- * Idempotent: exits if demo data already exists. Run: php cli/seed_demo.php
+ * Everything is written through the real services (PurchaseService,
+ * InvoiceDraft + BillingService, EstimateService, PaymentService,
+ * ExpenseService) so every business rule applies: stock moves, vouchers
+ * balance, numbers come from NumberSequence, and the books stay true.
+ * Nothing here writes a ledger or stock row by hand.
+ *
+ * It is a TOP-UP seeder — safe to run against a database that already has
+ * data. It restocks inventory, then adds estimates, held drafts, bills,
+ * receipts, vendor payments and expenses on top of whatever is there.
+ *
+ * Usage:
+ *   php cli/seed_demo.php              # top up once (skips if already run)
+ *   php cli/seed_demo.php --force      # run again anyway
+ *   php cli/seed_demo.php --no-sales   # everything EXCEPT bills, receipts and
+ *                                      # held drafts — rates, vendors, customers,
+ *                                      # stock, purchases, expenses, estimates —
+ *                                      # for a shop that will do its own billing
+ *
+ * Always finish with `php cli/verify-ledger.php`.
  */
 
 if (PHP_SAPI !== 'cli') {
@@ -17,341 +33,714 @@ if (PHP_SAPI !== 'cli') {
 require_once dirname(__DIR__) . '/src/bootstrap.php';
 
 use CRM\Auth\AuthUser;
-use CRM\Automation\AutomationService;
 use CRM\Customers\CustomerService;
 use CRM\Database\Database;
 use CRM\Expenses\ExpenseService;
-use CRM\HR\AttendanceService;
-use CRM\HR\EmployeeService;
-use CRM\HR\LeaveService;
-use CRM\Inventory\InventoryService;
-use CRM\Invoices\InvoiceService;
-use CRM\Leads\LeadService;
-use CRM\Orders\OrderService;
-use CRM\Repairs\RepairService;
+use CRM\Jewellery\BillingService;
+use CRM\Jewellery\EstimateService;
+use CRM\Jewellery\InvoiceDraft;
+use CRM\Jewellery\PaymentService;
+use CRM\Jewellery\PurchaseService;
+use CRM\Jewellery\RateService;
+use CRM\Jewellery\StockService;
+use CRM\Support\Audit;
+use CRM\Support\NumberSequence;
 use CRM\Vendors\VendorService;
 
-if ((int) Database::fetchValue('SELECT COUNT(*) FROM customers') > 0) {
-    exit("Demo data already present (customers exist) — nothing to do.\n");
-}
+$force = in_array('--force', $argv, true);
+$noSales = in_array('--no-sales', $argv, true);
 
+// ------------------------------------------------------------------ preflight
 $adminId = (int) Database::fetchValue("SELECT id FROM users WHERE username = 'admin'");
 if ($adminId === 0) {
     exit("Run database/seed.php first (no admin user found).\n");
 }
 $user = new AuthUser($adminId, 'admin', 'Super Admin', 'admin@mahalakshmijewellers.local', 0, ['super_admin'], false, null);
 
-$today = date('Y-m-d');
-$soon = static fn (int $days) => date('Y-m-d', strtotime("+$days days"));
-$ago = static fn (int $days) => date('Y-m-d', strtotime("-$days days"));
-$mdSoon = static fn (int $days) => '1990-' . date('m-d', strtotime("+$days days")); // birthday within N days
+$marker = Database::fetchValue("SELECT svalue FROM settings WHERE skey = 'demo_seeded_at'");
+if ($marker !== null && !$force) {
+    exit("Demo data was already seeded on {$marker}. Re-run with --force to add another round.\n");
+}
 
+$today = date('Y-m-d');
+$ago = static fn (int $d): string => date('Y-m-d', strtotime("-$d days"));
+
+/** @var array<string,int> */
+$counts = [];
 function step(string $label, callable $fn): void
 {
     try {
         $n = $fn();
-        echo "  OK  $label" . ($n !== null ? " ($n)" : '') . "\n";
+        echo '  OK   ' . str_pad($label, 34) . ($n !== null ? " $n" : '') . "\n";
     } catch (\Throwable $e) {
-        echo "WARN  $label -> " . $e->getMessage() . "\n";
+        echo '  WARN ' . str_pad($label, 34) . ' -> ' . $e->getMessage() . "\n";
     }
 }
 
-echo "Seeding demo data…\n";
+echo "Seeding jewellery demo data…\n";
 
-// ---------------------------------------------------------------- HR masters
-step('HR departments/designations', function (): string {
-    $depts = ['Sales', 'Production', 'Administration'];
-    foreach ($depts as $d) {
-        Database::execute('INSERT INTO departments (name) VALUES (:n) ON DUPLICATE KEY UPDATE name = name', ['n' => $d]);
+// ------------------------------------------------------------------ rates
+// Billing refuses to price a line without a rate for the bill date, so make
+// sure every date we are about to write a document on has one.
+step('Daily rates (last 30 days)', function () use ($user): string {
+    $base = ['24K' => 7340.0, '22K' => 6957.0, '18K' => 5579.0, '999' => 99.40, '925' => 92.50, 'PT950' => 3345.0];
+    $purityIds = [];
+    foreach (Database::fetchAll('SELECT id, code FROM purities') as $p) {
+        $purityIds[$p['code']] = (int) $p['id'];
     }
-    $desigs = ['Sales Executive', 'Karigar', 'Store Manager', 'Cashier'];
-    foreach ($desigs as $d) {
-        Database::execute('INSERT INTO designations (name) VALUES (:n) ON DUPLICATE KEY UPDATE name = name', ['n' => $d]);
-    }
-    return count($depts) . ' depts, ' . count($desigs) . ' designations';
-});
-
-$deptSales = (int) Database::fetchValue("SELECT id FROM departments WHERE name = 'Sales'");
-$deptProd = (int) Database::fetchValue("SELECT id FROM departments WHERE name = 'Production'");
-$shiftId = (int) Database::fetchValue('SELECT id FROM shifts ORDER BY id LIMIT 1');
-$gramUnit = (int) Database::fetchValue("SELECT id FROM units WHERE short_name = 'g' OR is_active = 1 ORDER BY (short_name='g') DESC LIMIT 1");
-
-// ---------------------------------------------------------------- Vendors
-$vendorIds = [];
-step('Vendors & karigars', function () use ($user, &$vendorIds): string {
-    $vendors = [
-        ['name' => 'Shah Bullion House', 'vendor_type' => 'bullion', 'company' => 'Shah Bullion', 'mobile' => '9820011111', 'city' => 'Mumbai', 'gstin' => '27AABCS1234A1Z5'],
-        ['name' => 'Kirti Diamonds', 'vendor_type' => 'diamond', 'company' => 'Kirti Gems', 'mobile' => '9820022222', 'city' => 'Surat'],
-        ['name' => 'Ramesh Karigar', 'vendor_type' => 'karigar', 'mobile' => '9820033333', 'specialisation' => 'Kundan & meenakari', 'karigar_rate' => 1200, 'city' => 'Jaipur'],
-        ['name' => 'Suresh Polish Works', 'vendor_type' => 'karigar', 'mobile' => '9820044444', 'specialisation' => 'Polishing & finishing', 'karigar_rate' => 800],
-    ];
-    foreach ($vendors as $v) {
-        $vendorIds[] = VendorService::save($v + ['vendor_status' => 'active'], $user);
-    }
-    return count($vendorIds) . ' vendors';
-});
-
-// ---------------------------------------------------------------- Customers
-$customerIds = [];
-step('Customers (360 profiles)', function () use ($user, $mdSoon, &$customerIds): string {
-    $customers = [
-        ['name' => 'Meera Shah', 'mobile' => '9990010001', 'email' => 'meera@example.com', 'city' => 'Mumbai', 'state' => 'Maharashtra', 'gender' => 'female', 'dob' => $mdSoon(2), 'anniversary' => $mdSoon(5), 'occupation' => 'Doctor', 'vip' => 1, 'stage' => 'active', 'family' => [['relation' => 'spouse', 'name' => 'Raj Shah', 'dob' => $mdSoon(4)]]],
-        ['name' => 'Anita Verma', 'mobile' => '9990010002', 'email' => 'anita@example.com', 'city' => 'Pune', 'gender' => 'female', 'dob' => '1985-03-14', 'occupation' => 'Architect', 'stage' => 'active'],
-        ['name' => 'Rohit Mehta', 'mobile' => '9990010003', 'city' => 'Mumbai', 'gender' => 'male', 'dob' => $mdSoon(6), 'occupation' => 'Businessman', 'vip' => 1, 'stage' => 'active'],
-        ['name' => 'Priya Nair', 'mobile' => '9990010004', 'email' => 'priya@example.com', 'city' => 'Thane', 'gender' => 'female', 'anniversary' => '1992-11-20', 'stage' => 'active'],
-        ['name' => 'Karan Patel', 'mobile' => '9990010005', 'city' => 'Ahmedabad', 'gender' => 'male', 'occupation' => 'CA', 'stage' => 'active'],
-        ['name' => 'Sunita Desai', 'mobile' => '9990010006', 'city' => 'Mumbai', 'gender' => 'female', 'dob' => '1978-06-01', 'stage' => 'onboarding'],
-        ['name' => 'Vikram Singh', 'mobile' => '9990010007', 'city' => 'Delhi', 'gender' => 'male', 'stage' => 'active'],
-        ['name' => 'Deepa Iyer', 'mobile' => '9990010008', 'email' => 'deepa@example.com', 'city' => 'Bengaluru', 'gender' => 'female', 'anniversary' => $mdSoon(3), 'vip' => 1, 'stage' => 'active'],
-    ];
-    foreach ($customers as $c) {
-        $customerIds[] = CustomerService::create($c, $user);
-    }
-    return count($customerIds) . ' customers';
-});
-
-// ---------------------------------------------------------------- Inventory
-$itemIds = [];
-step('Inventory (jewellery SKUs)', function () use ($user, $gramUnit, $vendorIds, &$itemIds): string {
-    $jc = static fn (string $name) => (int) Database::fetchValue("SELECT id FROM inventory_categories WHERE name = :n AND item_type = 'stock' LIMIT 1", ['n' => $name]);
-    $items = [
-        ['name' => '22K Gold Bangle Pair', 'category' => 'Gold', 'metal_type' => 'Gold', 'purity' => '22K', 'gross_wt' => 42.5, 'net_wt' => 41.0, 'making_charge' => 12000, 'wastage_pct' => 8, 'selling_price' => 385000, 'purchase_price' => 350000, 'opening_qty' => 2, 'reorder_level' => 1, 'hsn_code' => '7113'],
-        ['name' => 'Diamond Solitaire Ring', 'category' => 'Diamond', 'metal_type' => 'Gold', 'purity' => '18K', 'gross_wt' => 5.2, 'net_wt' => 4.1, 'stone_wt' => 1.1, 'making_charge' => 18000, 'selling_price' => 145000, 'purchase_price' => 120000, 'opening_qty' => 1, 'reorder_level' => 2, 'hsn_code' => '7113'],
-        ['name' => 'Bridal Necklace Set', 'category' => 'Bridal Collection', 'metal_type' => 'Gold', 'purity' => '22K', 'gross_wt' => 88.0, 'net_wt' => 82.5, 'making_charge' => 35000, 'wastage_pct' => 10, 'selling_price' => 720000, 'purchase_price' => 640000, 'opening_qty' => 1, 'reorder_level' => 1, 'hsn_code' => '7113'],
-        ['name' => 'Silver Payal Pair', 'category' => 'Silver', 'metal_type' => 'Silver', 'purity' => '92.5', 'gross_wt' => 120.0, 'net_wt' => 120.0, 'making_charge' => 1500, 'selling_price' => 12500, 'purchase_price' => 9500, 'opening_qty' => 6, 'reorder_level' => 2],
-        ['name' => 'Temple Jhumka Earrings', 'category' => 'Temple Jewellery', 'metal_type' => 'Gold', 'purity' => '22K', 'gross_wt' => 18.4, 'net_wt' => 17.2, 'making_charge' => 9000, 'selling_price' => 165000, 'purchase_price' => 148000, 'opening_qty' => 1, 'reorder_level' => 3],
-        ['name' => 'Gold Chain 20 inch', 'category' => 'Gold', 'metal_type' => 'Gold', 'purity' => '22K', 'gross_wt' => 24.0, 'net_wt' => 24.0, 'making_charge' => 6000, 'selling_price' => 205000, 'purchase_price' => 190000, 'opening_qty' => 4, 'reorder_level' => 2],
-        ['name' => "Men's Kada", 'category' => "Men's Collection", 'metal_type' => 'Gold', 'purity' => '22K', 'gross_wt' => 35.0, 'net_wt' => 34.0, 'making_charge' => 8000, 'selling_price' => 300000, 'purchase_price' => 280000, 'opening_qty' => 2, 'reorder_level' => 1],
-        ['name' => 'Kids Gold Nazariya', 'category' => 'Kids Collection', 'metal_type' => 'Gold', 'purity' => '18K', 'gross_wt' => 3.1, 'net_wt' => 3.0, 'making_charge' => 1500, 'selling_price' => 24000, 'purchase_price' => 21000, 'opening_qty' => 1, 'reorder_level' => 4],
-        ['name' => 'Platinum Couple Band', 'category' => 'Platinum', 'metal_type' => 'Platinum', 'gross_wt' => 9.0, 'net_wt' => 9.0, 'making_charge' => 12000, 'selling_price' => 95000, 'purchase_price' => 82000, 'opening_qty' => 2, 'reorder_level' => 1],
-        ['name' => 'Gold Coin 10g', 'category' => 'Coins & Bars', 'metal_type' => 'Gold', 'purity' => '24K', 'gross_wt' => 10.0, 'net_wt' => 10.0, 'selling_price' => 78000, 'purchase_price' => 75000, 'opening_qty' => 5, 'reorder_level' => 3],
-    ];
-    foreach ($items as $i => $it) {
-        $categoryId = $jc($it['category']);
-        unset($it['category']);
-        $body = $it + [
-            'item_type' => 'stock',
-            'unit_id' => $gramUnit,
-            'category_id' => $categoryId,
-            'vendor_id' => $vendorIds[$i % max(1, count($vendorIds))] ?? null,
-            'opening_cost' => $it['purchase_price'] ?? 0,
-        ];
-        $itemIds[] = InventoryService::createItem($body, $user);
-    }
-    return count($itemIds) . ' SKUs';
-});
-
-// ---------------------------------------------------------------- Leads
-step('Leads / enquiries', function () use ($user): string {
-    $srcId = static fn (string $n) => (int) Database::fetchValue('SELECT id FROM lead_sources WHERE name = :n LIMIT 1', ['n' => $n]);
-    $leads = [
-        ['name' => 'Neha Kulkarni', 'mobile' => '9871000001', 'interest_type' => 'Bridal', 'budget_range' => '₹2L–5L', 'channel_type' => 'walk_in', 'source_id' => $srcId('Walk-in'), 'expected_value' => 300000, 'status' => 'New'],
-        ['name' => 'Amit Joshi', 'mobile' => '9871000002', 'interest_type' => 'Diamond', 'budget_range' => '₹1L–2L', 'channel_type' => 'google', 'source_id' => $srcId('Google'), 'expected_value' => 150000, 'status' => 'Contacted'],
-        ['name' => 'Sneha Rao', 'mobile' => '9871000003', 'interest_type' => 'Gold', 'budget_range' => '₹50k–1L', 'channel_type' => 'instagram', 'source_id' => $srcId('Instagram'), 'expected_value' => 80000, 'status' => 'Qualified'],
-        ['name' => 'Rahul Kapoor', 'mobile' => '9871000004', 'interest_type' => 'Custom', 'channel_type' => 'referral', 'source_id' => $srcId('Referral'), 'expected_value' => 220000, 'status' => 'Meeting Scheduled'],
-        ['name' => 'Pooja Shetty', 'mobile' => '9871000005', 'interest_type' => 'Silver', 'channel_type' => 'walk_in', 'source_id' => $srcId('Walk-in'), 'expected_value' => 20000, 'status' => 'New'],
-        ['name' => 'Manish Gupta', 'mobile' => '9871000006', 'interest_type' => 'Gold', 'channel_type' => 'phone', 'expected_value' => 120000, 'status' => 'Negotiation'],
-    ];
-    $n = 0;
-    foreach ($leads as $l) {
-        LeadService::create($l, $user);
-        $n++;
-    }
-    return "$n enquiries";
-});
-
-// ---------------------------------------------------------------- Orders
-step('Custom orders', function () use ($user, $customerIds, $vendorIds): string {
-    $orders = [
-        ['title' => 'Bridal necklace set (custom)', 'category' => 'Bridal', 'production_type' => 'in_house', 'karigar' => 'In-house team', 'metal_details' => '22K gold, 85g', 'estimated_cost' => 450000, 'advance_paid' => 100000, 'quoted_price' => 620000, 'to' => 'in_production'],
-        ['title' => 'Diamond pendant', 'category' => 'Diamond', 'production_type' => 'outsource', 'vendor_id' => $vendorIds[1] ?? null, 'metal_details' => '18K, 0.8ct', 'estimated_cost' => 90000, 'advance_paid' => 30000, 'quoted_price' => 140000, 'to' => 'quality_check'],
-        ['title' => 'Custom kada engraving', 'category' => 'Gold', 'production_type' => 'outsource', 'vendor_id' => $vendorIds[2] ?? null, 'metal_details' => '22K, 40g', 'estimated_cost' => 260000, 'advance_paid' => 80000, 'quoted_price' => 320000, 'to' => 'customer_review'],
-        ['title' => 'Temple jhumka pair', 'category' => 'Temple', 'production_type' => 'in_house', 'estimated_cost' => 140000, 'quoted_price' => 185000, 'to' => 'delivered'],
-        ['title' => 'Engagement ring', 'category' => 'Diamond', 'production_type' => 'in_house', 'estimated_cost' => 70000, 'advance_paid' => 20000, 'quoted_price' => 110000, 'to' => 'pending'],
-    ];
-    $n = 0;
-    foreach ($orders as $i => $o) {
-        $to = $o['to'];
-        unset($o['to']);
-        $body = $o + [
-            'customer_id' => $customerIds[$i % count($customerIds)],
-            'order_date' => date('Y-m-d', strtotime('-' . (3 + $i) . ' days')),
-            'expected_date' => date('Y-m-d', strtotime('+' . (7 + $i) . ' days')),
-            'items' => [['description' => $o['title'], 'gold_wt' => 20 + $i, 'purity' => '22K', 'making_charge' => 8000, 'qty' => 1, 'line_total' => $o['quoted_price']]],
-        ];
-        $oid = OrderService::create($body, $user);
-        // advance the pipeline to the target status
-        $flow = ['pending', 'in_production', 'quality_check', 'customer_review', 'approved', 'delivered'];
-        foreach ($flow as $st) {
-            if ($st === 'pending') {
-                continue;
-            }
-            OrderService::changeStatus($oid, ['status' => $st], $user);
-            if ($st === $to) {
-                break;
-            }
-        }
-        $n++;
-    }
-    return "$n orders";
-});
-
-// ---------------------------------------------------------------- Repairs
-step('Repairs', function () use ($user, $customerIds, $vendorIds): string {
-    $repairs = [
-        ['item_description' => 'Gold chain — broken clasp', 'category' => 'Gold', 'issue' => 'Clasp broken, needs resolder', 'estimated_cost' => 800, 'to' => 'in_progress'],
-        ['item_description' => 'Diamond ring — loose stone', 'category' => 'Diamond', 'issue' => 'Stone loose in setting', 'estimated_cost' => 1500, 'to' => 'ready'],
-        ['item_description' => 'Bangle — resize', 'category' => 'Gold', 'issue' => 'Resize to smaller', 'estimated_cost' => 1200, 'vendor_id' => $vendorIds[3] ?? null, 'to' => 'received'],
-        ['item_description' => 'Necklace — polish', 'category' => 'Gold', 'issue' => 'Full polish & rhodium', 'estimated_cost' => 600, 'to' => 'delivered'],
-        ['item_description' => 'Earrings — hook repair', 'category' => 'Silver', 'issue' => 'Broken hook', 'estimated_cost' => 300, 'to' => 'quality_check'],
-    ];
-    $n = 0;
-    foreach ($repairs as $i => $r) {
-        $to = $r['to'];
-        unset($r['to']);
-        $body = $r + [
-            'customer_id' => $customerIds[$i % count($customerIds)],
-            'received_date' => date('Y-m-d', strtotime('-' . (1 + $i) . ' days')),
-            'expected_date' => date('Y-m-d', strtotime('+' . (3 + $i) . ' days')),
-            'technician' => 'In-house',
-        ];
-        $rid = RepairService::create($body, $user);
-        $flow = ['received', 'diagnosed', 'in_progress', 'quality_check', 'ready', 'delivered'];
-        foreach ($flow as $st) {
-            if ($st === 'received') {
-                continue;
-            }
-            RepairService::changeStatus($rid, ['status' => $st], $user);
-            if ($st === $to) {
-                break;
-            }
-        }
-        $n++;
-    }
-    return "$n repairs";
-});
-
-// ---------------------------------------------------------------- Invoices
-step('Invoices + payments', function () use ($user, $customerIds, $today, $ago): string {
-    $invoices = [
-        ['ci' => 0, 'desc' => '22K Gold Bangle Pair', 'rate' => 385000, 'gross' => 42.5, 'purity' => '22K', 'making' => 12000, 'old_gold' => 25000, 'pay' => 'full', 'date' => $today],
-        ['ci' => 2, 'desc' => 'Gold Chain 20 inch', 'rate' => 205000, 'gross' => 24, 'purity' => '22K', 'making' => 6000, 'old_gold' => 0, 'pay' => 'full', 'date' => $ago(2)],
-        ['ci' => 7, 'desc' => 'Diamond Solitaire Ring', 'rate' => 145000, 'gross' => 5.2, 'purity' => '18K', 'making' => 18000, 'old_gold' => 0, 'pay' => 'partial', 'date' => $ago(5)],
-        ['ci' => 1, 'desc' => 'Silver Payal Pair', 'rate' => 12500, 'gross' => 120, 'purity' => '92.5', 'making' => 1500, 'old_gold' => 0, 'pay' => 'full', 'date' => $ago(8)],
-        ['ci' => 3, 'desc' => 'Temple Jhumka Earrings', 'rate' => 165000, 'gross' => 18.4, 'purity' => '22K', 'making' => 9000, 'old_gold' => 10000, 'pay' => 'none', 'date' => $ago(1)],
-        ['ci' => 6, 'desc' => 'Gold Coin 10g', 'rate' => 78000, 'gross' => 10, 'purity' => '24K', 'making' => 0, 'old_gold' => 0, 'pay' => 'full', 'date' => $ago(12)],
-    ];
-    $n = 0;
-    foreach ($invoices as $inv) {
-        $id = InvoiceService::create([
-            'customer_id' => $customerIds[$inv['ci']],
-            'invoice_date' => $inv['date'],
-            'sale_type' => 'ready',
-            'old_gold_adjustment' => $inv['old_gold'],
-            'items' => [[
-                'item_type' => 'stock', 'description' => $inv['desc'], 'qty' => 1, 'rate' => $inv['rate'],
-                'tax_rate' => 3, 'metal_type' => 'Gold', 'gross_wt' => $inv['gross'], 'purity' => $inv['purity'],
-                'making_charge' => $inv['making'], 'hsn_code' => '7113',
-            ]],
-        ], $user);
-        InvoiceService::finalize($id, $user);
-        $grand = (float) Database::fetchValue('SELECT grand_total FROM invoices WHERE id = :id', ['id' => $id]);
-        if ($inv['pay'] === 'full') {
-            InvoiceService::addPayment($id, ['amount' => $grand, 'payment_date' => $inv['date'], 'payment_mode' => 'upi'], $user);
-        } elseif ($inv['pay'] === 'partial') {
-            InvoiceService::addPayment($id, ['amount' => round($grand * 0.4, 2), 'payment_date' => $inv['date'], 'payment_mode' => 'cash'], $user);
-        }
-        $n++;
-    }
-    return "$n invoices";
-});
-
-// ---------------------------------------------------------------- Automation log
-step('Automation messages', function () use ($user): string {
-    $tpl = static fn (string $n) => Database::fetchValue('SELECT id FROM message_templates WHERE name = :n', ['n' => $n]);
-    $msgs = [
-        ['channel' => 'whatsapp', 'template_id' => $tpl('Lead follow-up reminder'), 'recipient_name' => 'Amit Joshi', 'recipient_contact' => '9871000002', 'body' => 'Hi Amit, following up on your diamond enquiry.', 'event' => 'lead_followup', 'status' => 'delivered'],
-        ['channel' => 'email', 'template_id' => $tpl('Invoice receipt'), 'recipient_name' => 'Meera Shah', 'recipient_contact' => 'meera@example.com', 'subject' => 'Your invoice', 'body' => 'Thank you for your purchase.', 'event' => 'invoice_receipt', 'status' => 'sent'],
-        ['channel' => 'whatsapp', 'template_id' => $tpl('Repair ready'), 'recipient_name' => 'Priya Nair', 'recipient_contact' => '9990010004', 'body' => 'Your repair is ready for pickup.', 'event' => 'repair_status', 'status' => 'delivered'],
-        ['channel' => 'whatsapp', 'template_id' => $tpl('Birthday wish'), 'recipient_name' => 'Rohit Mehta', 'recipient_contact' => '9990010003', 'body' => 'Happy Birthday Rohit!', 'event' => 'birthday', 'status' => 'queued'],
-    ];
-    $n = 0;
-    foreach ($msgs as $m) {
-        $status = $m['status'];
-        unset($m['status']);
-        $mid = AutomationService::queue($m, $user);
-        if ($status !== 'queued') {
-            AutomationService::logStatus(['id' => $mid, 'status' => $status], );
-        }
-        $n++;
-    }
-    return "$n messages";
-});
-
-// ---------------------------------------------------------------- Employees + attendance
-$employeeIds = [];
-step('Employees', function () use ($user, $deptSales, $deptProd, $shiftId, &$employeeIds): string {
-    $emps = [
-        ['first_name' => 'Rajesh', 'last_name' => 'Kumar', 'phone' => '9000000001', 'department_id' => $deptSales, 'employee_type' => 'full_time', 'basic_salary' => 35000, 'date_of_joining' => '2022-04-01'],
-        ['first_name' => 'Sneha', 'last_name' => 'Pawar', 'phone' => '9000000002', 'department_id' => $deptSales, 'employee_type' => 'full_time', 'basic_salary' => 30000, 'date_of_joining' => '2023-01-15'],
-        ['first_name' => 'Imran', 'last_name' => 'Shaikh', 'phone' => '9000000003', 'department_id' => $deptProd, 'employee_type' => 'full_time', 'basic_salary' => 40000, 'date_of_joining' => '2021-08-10'],
-        ['first_name' => 'Kavita', 'last_name' => 'Rane', 'phone' => '9000000004', 'department_id' => $deptProd, 'employee_type' => 'part_time', 'basic_salary' => 22000, 'date_of_joining' => '2023-06-05'],
-        ['first_name' => 'Farhan', 'last_name' => 'Ali', 'phone' => '9000000005', 'department_id' => $deptSales, 'employee_type' => 'contract', 'basic_salary' => 28000, 'date_of_joining' => '2024-02-20'],
-    ];
-    foreach ($emps as $e) {
-        $employeeIds[] = EmployeeService::save($e + ['shift_id' => $shiftId ?: null, 'status' => 'active'], $user);
-    }
-    return count($employeeIds) . ' employees';
-});
-
-step("Attendance (today + last 5 days)", function () use ($user, $employeeIds, $ago, $today): string {
-    $statuses = ['present', 'present', 'present', 'late', 'present'];
-    $rows = [];
-    for ($d = 0; $d < 6; $d++) {
-        $date = $d === 0 ? $today : $ago($d);
-        foreach ($employeeIds as $i => $eid) {
-            $st = $d === 0 && $i === 3 ? 'on_leave' : ($d === 2 && $i === 1 ? 'half_day' : $statuses[$i % count($statuses)]);
-            $rows[] = ['employee_id' => $eid, 'attendance_date' => $date, 'status' => $st, 'check_in' => $st === 'late' ? '10:20' : '10:00', 'check_out' => '19:00'];
-        }
-    }
-    $n = AttendanceService::mark(['rows' => $rows], $user);
-    return "$n rows";
-});
-
-step('Leave request (pending)', function () use ($user, $employeeIds): string {
-    $lt = (int) Database::fetchValue("SELECT id FROM leave_types WHERE code = 'CL' LIMIT 1");
-    if ($lt === 0 || empty($employeeIds)) {
-        return 'skipped';
-    }
-    LeaveService::apply([
-        'employee_id' => $employeeIds[0], 'leave_type_id' => $lt,
-        'start_date' => date('Y-m-d', strtotime('+3 days')), 'end_date' => date('Y-m-d', strtotime('+4 days')),
-        'reason' => 'Family function',
-    ], $user, true);
-    return '1 pending';
-});
-
-// ---------------------------------------------------------------- Expenses
-step('Expenses', function () use ($user, $ago, $today): string {
-    $catId = (int) Database::fetchValue("SELECT id FROM expense_categories WHERE is_system = 0 AND name = 'Rent' LIMIT 1");
-    $marketing = (int) Database::fetchValue("SELECT id FROM expense_categories WHERE is_system = 0 AND name = 'Marketing' LIMIT 1");
-    $utils = (int) Database::fetchValue("SELECT id FROM expense_categories WHERE is_system = 0 AND name = 'Utilities' LIMIT 1");
-    $expenses = [
-        ['category_id' => $catId, 'amount' => 60000, 'description' => 'Showroom rent', 'paid_to' => 'Landlord', 'payment_mode' => 'bank', 'expense_date' => $today, 'type' => 'fixed'],
-        ['category_id' => $utils, 'amount' => 8500, 'description' => 'Electricity bill', 'payment_mode' => 'upi', 'expense_date' => $ago(3)],
-        ['category_id' => $marketing, 'amount' => 15000, 'description' => 'Instagram ads', 'payment_mode' => 'card', 'expense_date' => $ago(6)],
-        ['category_id' => $utils, 'amount' => 2200, 'description' => 'Internet & phone', 'payment_mode' => 'upi', 'expense_date' => $ago(10)],
-        ['category_id' => $marketing, 'amount' => 9000, 'description' => 'Festival banners', 'payment_mode' => 'cash', 'expense_date' => $ago(14)],
-    ];
-    $n = 0;
-    foreach ($expenses as $e) {
-        if ((int) $e['category_id'] === 0) {
+    $written = 0;
+    for ($d = 30; $d >= 0; $d--) {
+        $date = date('Y-m-d', strtotime("-$d days"));
+        if (RateService::ratesSetFor($date)) {
             continue;
         }
-        ExpenseService::create($e, $user);
-        $n++;
+        // a gentle sine drift so the rate-history chart is not a flat line
+        $drift = 1 + (sin($d / 4.5) * 0.012);
+        $rates = [];
+        foreach ($base as $code => $rate) {
+            if (!isset($purityIds[$code])) {
+                continue;
+            }
+            $rates[$purityIds[$code]] = round($rate * $drift, 2);
+        }
+        RateService::setRates($rates, $date, $user->id);
+        $written++;
     }
-    return "$n expenses";
+    return $written . ' day(s) added';
 });
 
-echo "\nDemo data seeded. Log in as admin / admin123 to explore.\n";
+// ------------------------------------------------------------------ customers
+$customerIds = array_map('intval', array_column(
+    Database::fetchAll('SELECT id FROM customers WHERE is_active = 1 ORDER BY id'),
+    'id'
+));
+
+step('Customers', function () use ($user, &$customerIds): string {
+    $new = [
+        ['name' => 'Meera Shah', 'mobile' => '9820140001', 'email' => 'meera.shah@example.com', 'city' => 'Mumbai', 'state' => 'Maharashtra', 'gender' => 'female', 'dob' => '1988-03-12', 'anniversary' => '2012-11-24', 'occupation' => 'Doctor', 'vip' => 1, 'gstin' => '27AAJPS1234C1ZQ'],
+        ['name' => 'Rohit Mehta', 'mobile' => '9820140002', 'city' => 'Mumbai', 'state' => 'Maharashtra', 'gender' => 'male', 'occupation' => 'Businessman', 'vip' => 1],
+        ['name' => 'Anita Verma', 'mobile' => '9820140003', 'email' => 'anita.verma@example.com', 'city' => 'Pune', 'state' => 'Maharashtra', 'gender' => 'female', 'dob' => '1985-06-30'],
+        ['name' => 'Priya Nair', 'mobile' => '9820140004', 'city' => 'Thane', 'state' => 'Maharashtra', 'gender' => 'female', 'anniversary' => '2016-01-18'],
+        ['name' => 'Karan Patel', 'mobile' => '9820140005', 'city' => 'Ahmedabad', 'state' => 'Gujarat', 'gender' => 'male', 'occupation' => 'Chartered Accountant', 'gstin' => '24ABCPP7788L1Z3'],
+        ['name' => 'Sunita Desai', 'mobile' => '9820140006', 'city' => 'Mumbai', 'state' => 'Maharashtra', 'gender' => 'female', 'opening_balance' => 45000, 'opening_type' => 'debit'],
+        ['name' => 'Vikram Singh', 'mobile' => '9820140007', 'city' => 'Delhi', 'state' => 'Delhi', 'gender' => 'male', 'gstin' => '07AACPS9911M1Z8'],
+        ['name' => 'Deepa Iyer', 'mobile' => '9820140008', 'email' => 'deepa.iyer@example.com', 'city' => 'Mumbai', 'state' => 'Maharashtra', 'gender' => 'female', 'vip' => 1],
+    ];
+    $added = 0;
+    foreach ($new as $c) {
+        $exists = Database::fetchValue('SELECT id FROM customers WHERE mobile = :m', ['m' => $c['mobile']]);
+        if ($exists !== null) {
+            $customerIds[] = (int) $exists;
+            continue;
+        }
+        $customerIds[] = CustomerService::create($c, $user);
+        $added++;
+    }
+    $customerIds = array_values(array_unique($customerIds));
+    return $added . ' added (' . count($customerIds) . ' total)';
+});
+
+// ------------------------------------------------------------------ vendors
+// The purchases below buy from bullion vendors and the job-work bill needs a
+// karigar, so make sure the vendor book has real names in it.
+step('Vendors', function () use ($user): string {
+    // a shop-added type (vendor_types master), so the "+ Add a new type…" flow
+    // has visible demo data — angadia is the trade's traditional secure courier
+    if (Database::fetchValue("SELECT id FROM vendor_types WHERE slug = 'angadia_courier'") === null) {
+        VendorService::addType(['label' => 'Angadia / Courier'], $user);
+    }
+    $vendors = [
+        ['name' => 'Vora Gold Refiners', 'vendor_type' => 'bullion', 'company' => 'Vora Gold Refiners Pvt Ltd', 'contact_person' => 'Jayesh Vora', 'mobile' => '9821330011', 'city' => 'Mumbai', 'state' => 'Maharashtra', 'gstin' => '27AABCV2233K1Z5', 'payment_terms' => '15 days credit'],
+        ['name' => 'Shree Balaji Metals', 'vendor_type' => 'bullion', 'contact_person' => 'Mahesh Agarwal', 'mobile' => '9821330022', 'city' => 'Mumbai', 'state' => 'Maharashtra', 'gstin' => '27AAGCS8899P1Z2', 'payment_terms' => '7 days credit'],
+        ['name' => 'Sai Karigar Works', 'vendor_type' => 'karigar', 'contact_person' => 'Ramu Sonar', 'mobile' => '9821330033', 'city' => 'Mumbai', 'state' => 'Maharashtra', 'specialisation' => 'Temple & antique jewellery', 'karigar_rate' => 550],
+        ['name' => 'Shree Jewel Craft', 'vendor_type' => 'karigar', 'contact_person' => 'Dinesh Soni', 'mobile' => '9821330044', 'city' => 'Thane', 'state' => 'Maharashtra', 'specialisation' => 'Stone setting & polish', 'karigar_rate' => 480],
+        ['name' => 'Ratna Gems', 'vendor_type' => 'stone', 'contact_person' => 'Paresh Jhaveri', 'mobile' => '9821330055', 'city' => 'Surat', 'state' => 'Gujarat', 'payment_terms' => '30 days credit'],
+        ['name' => 'Patel Angadia Services', 'vendor_type' => 'angadia_courier', 'contact_person' => 'Bharat Patel', 'mobile' => '9821330066', 'city' => 'Mumbai', 'state' => 'Maharashtra', 'payment_terms' => 'On delivery', 'notes' => 'Weekly Mumbai–Surat–Rajkot run for stones and job-work pieces.'],
+    ];
+    $added = 0;
+    foreach ($vendors as $v) {
+        if (Database::fetchValue('SELECT id FROM suppliers WHERE name = :n', ['n' => $v['name']]) !== null) {
+            continue;
+        }
+        VendorService::save($v, $user);
+        $added++;
+    }
+    return $added . ' added';
+});
+
+// ------------------------------------------------------------------ bank accounts
+// Nothing in the app auto-creates these, and bank/card money needs somewhere to
+// land — expenses, vendor payments and receipts all pick from this list.
+step('Bank accounts', function (): string {
+    if ((int) Database::fetchValue('SELECT COUNT(*) FROM bank_accounts') > 0) {
+        return 'already present';
+    }
+    Database::insert('bank_accounts', [
+        'account_name' => 'Mahalakshmi Jewellers — Current A/c',
+        'bank_name' => 'HDFC Bank',
+        'account_number' => '50200045214521',
+        'ifsc_code' => 'HDFC0000241',
+        'upi_id' => 'mahalakshmijewellers@hdfcbank',
+    ]);
+    Database::insert('bank_accounts', [
+        'account_name' => 'Savings A/c — Owner',
+        'bank_name' => 'Bank of Maharashtra',
+        'account_number' => '60123400778899',
+        'ifsc_code' => 'MAHB0000123',
+    ]);
+    return '2 added';
+});
+
+// ------------------------------------------------------------------ purchases
+// Buying stock is what puts sellable pieces on the shelf AND creates the
+// vendor payables that the outstanding report needs.
+$purityByCode = [];
+foreach (Database::fetchAll('SELECT id, code FROM purities') as $p) {
+    $purityByCode[$p['code']] = (int) $p['id'];
+}
+$categoryByName = [];
+foreach (Database::fetchAll('SELECT id, name FROM inventory_categories') as $c) {
+    $categoryByName[$c['name']] = (int) $c['id'];
+}
+$bullionVendors = array_map('intval', array_column(
+    Database::fetchAll("SELECT id FROM suppliers WHERE vendor_type = 'bullion' AND is_active = 1 ORDER BY id"),
+    'id'
+));
+$karigarVendors = array_map('intval', array_column(
+    Database::fetchAll("SELECT id FROM suppliers WHERE vendor_type = 'karigar' AND is_active = 1 ORDER BY id"),
+    'id'
+));
+
+$purchaseIds = [];
+step('Purchases (restocks the shelf)', function () use (
+    $user, $ago, $purityByCode, $categoryByName, $bullionVendors, $karigarVendors, &$purchaseIds
+): string {
+    if ($bullionVendors === []) {
+        throw new RuntimeException('No bullion vendor found — run database/seed.php.');
+    }
+
+    // catalogue of pieces to buy in: [name, category, metal, purity, gross, net, making_type, making_value, cost/g]
+    $catalogue = [
+        ['Gold Bangle Pair — antique finish', 'Bangle', 'gold', '22K', 42.500, 41.200, 'per_gram', 620, 6510],
+        ['Gold Kada — plain', 'Bangle', 'gold', '22K', 35.100, 35.100, 'per_gram', 480, 6510],
+        ['Gold Chain 20" — rope', 'Chain', 'gold', '22K', 24.360, 24.360, 'per_gram', 420, 6510],
+        ['Gold Chain 24" — box', 'Chain', 'gold', '22K', 31.180, 31.180, 'per_gram', 420, 6510],
+        ['Bridal Necklace Set — temple', 'Necklace', 'gold', '22K', 88.420, 82.640, 'per_gram', 780, 6510],
+        ['Gold Necklace — kundan', 'Necklace', 'gold', '22K', 54.900, 49.300, 'fixed', 42000, 6510],
+        ['Jhumka Earrings — temple design', 'Earring', 'gold', '22K', 18.460, 17.240, 'per_gram', 560, 6510],
+        ['Stud Earrings — daily wear', 'Earring', 'gold', '18K', 6.220, 6.220, 'per_gram', 640, 5240],
+        ['Diamond Solitaire Ring', 'Ring', 'gold', '18K', 5.240, 4.100, 'fixed', 18500, 5240],
+        ['Gents Ring — signet', 'Ring', 'gold', '22K', 9.860, 9.860, 'per_gram', 520, 6510],
+        ['Ladies Ring — floral', 'Ring', 'gold', '18K', 4.180, 3.960, 'percent', 12, 5240],
+        ['Pendant — Ganesh', 'Pendant', 'gold', '22K', 7.640, 7.640, 'per_gram', 540, 6510],
+        ['Pendant Set with chain', 'Pendant', 'gold', '18K', 12.320, 11.480, 'fixed', 9500, 5240],
+        ['Gold Bracelet — cuban link', 'Bracelet', 'gold', '22K', 22.740, 22.740, 'per_gram', 500, 6510],
+        ['Gold Coin 10 g — 999', 'Coin & Bar', 'gold', '24K', 10.000, 10.000, 'fixed', 350, 6960],
+        ['Gold Coin 5 g — 999', 'Coin & Bar', 'gold', '24K', 5.000, 5.000, 'fixed', 250, 6960],
+        ['Gold Bar 20 g — 999', 'Coin & Bar', 'gold', '24K', 20.000, 20.000, 'fixed', 600, 6960],
+        ['Silver Payal Pair — ghungroo', 'Bangle', 'silver', '925', 124.600, 124.600, 'per_gram', 11, 86],
+        ['Silver Bracelet — oxidised', 'Bracelet', 'silver', '925', 46.200, 46.200, 'per_gram', 14, 86],
+        ['Silver Chain — 18"', 'Chain', 'silver', '925', 28.400, 28.400, 'per_gram', 12, 86],
+        ['Silver Pooja Coin 20 g', 'Coin & Bar', 'silver', '999', 20.000, 20.000, 'fixed', 180, 93],
+        ['Silver Toe Ring Set', 'Ring', 'silver', '925', 12.800, 12.800, 'per_gram', 15, 86],
+        ['Gold Mangalsutra — short', 'Necklace', 'gold', '22K', 16.940, 16.240, 'per_gram', 600, 6510],
+        ['Gold Nose Pin', 'Pendant', 'gold', '18K', 1.240, 1.180, 'fixed', 1200, 5240],
+        ['Gold Bangle — single, machine cut', 'Bangle', 'gold', '22K', 19.780, 19.780, 'per_gram', 540, 6510],
+        ['Gold Bangle Set of 4 — thin', 'Bangle', 'gold', '22K', 28.640, 28.640, 'per_gram', 560, 6510],
+        ['Gold Chain 18" — figaro', 'Chain', 'gold', '22K', 18.920, 18.920, 'per_gram', 420, 6510],
+        ['Gold Haar — long rani', 'Necklace', 'gold', '22K', 96.280, 91.400, 'per_gram', 820, 6510],
+        ['Choker Necklace — polki', 'Necklace', 'gold', '18K', 44.600, 38.200, 'fixed', 65000, 5240],
+        ['Chandbali Earrings — 22K', 'Earring', 'gold', '22K', 21.340, 20.180, 'per_gram', 580, 6510],
+        ['Hoop Earrings — 18K', 'Earring', 'gold', '18K', 4.860, 4.860, 'per_gram', 620, 5240],
+        ['Cocktail Ring — CZ', 'Ring', 'gold', '18K', 6.480, 5.940, 'fixed', 14500, 5240],
+        ['Engagement Ring — solitaire 0.5ct', 'Ring', 'gold', '18K', 4.920, 3.680, 'fixed', 26000, 5240],
+        ['Baby Bangle Pair — 22K', 'Bangle', 'gold', '22K', 11.260, 11.260, 'per_gram', 520, 6510],
+        ['Gold Coin 2 g — 999', 'Coin & Bar', 'gold', '24K', 2.000, 2.000, 'fixed', 180, 6960],
+        ['Silver Dinner Set — 6 pc', 'Coin & Bar', 'silver', '925', 860.000, 860.000, 'per_gram', 9, 86],
+        ['Silver Kumkum Box', 'Coin & Bar', 'silver', '925', 96.400, 96.400, 'per_gram', 13, 86],
+        ['Silver Anklet — kids', 'Bangle', 'silver', '925', 34.200, 34.200, 'per_gram', 15, 86],
+    ];
+
+    // three receipts spread over the last fortnight, plus loose bulk metal
+    $batches = [
+        ['days' => 14, 'vendor' => $bullionVendors[0], 'slice' => [0, 9], 'bulk' => ['metal' => 'gold', 'purity' => '24K', 'weight' => 250.000, 'rate' => 6960],  'ref' => 'VGR/26-27/0412'],
+        ['days' => 7,  'vendor' => $bullionVendors[1] ?? $bullionVendors[0], 'slice' => [9, 8], 'bulk' => ['metal' => 'silver', 'purity' => '999', 'weight' => 3200.000, 'rate' => 93], 'ref' => 'SBM/26-27/1188'],
+        ['days' => 2,  'vendor' => $bullionVendors[0], 'slice' => [17, 7], 'bulk' => null, 'ref' => 'VGR/26-27/0455'],
+        ['days' => 1,  'vendor' => $bullionVendors[1] ?? $bullionVendors[0], 'slice' => [24, 16], 'bulk' => ['metal' => 'gold', 'purity' => '22K', 'weight' => 180.000, 'rate' => 6510], 'ref' => 'SBM/26-27/1204'],
+    ];
+
+    $pieces = 0;
+    foreach ($batches as $i => $batch) {
+        $lines = [];
+        foreach (array_slice($catalogue, $batch['slice'][0], $batch['slice'][1]) as $p) {
+            [$name, $cat, $metal, $purity, $gross, $net, $mkType, $mkValue, $costPerGram] = $p;
+            $lines[] = [
+                'kind' => 'tagged',
+                'description' => $name,
+                'category_id' => $categoryByName[$cat] ?? null,
+                'metal' => $metal,
+                'purity_id' => $purityByCode[$purity] ?? null,
+                'qty' => 1,
+                'gross_weight' => $gross,
+                'net_weight' => $net,
+                'weight' => $net,
+                'rate_per_gram' => $costPerGram,
+                'making_charge' => 0,
+                'making_type' => $mkType,
+                'making_value' => $mkValue,
+                'hsn_code' => '7113',
+                // salted per run — a --force re-run must not collide with the
+                // HUIDs the previous round stamped on its pieces
+                'huid' => strtoupper(substr(md5(uniqid($name . $i, true)), 0, 6)),
+                'tax_rate' => 3,
+            ];
+            $pieces++;
+        }
+
+        if ($batch['bulk'] !== null) {
+            $b = $batch['bulk'];
+            $lines[] = [
+                'kind' => 'bulk',
+                'description' => ucfirst($b['metal']) . ' ' . $b['purity'] . ' bullion',
+                'metal' => $b['metal'],
+                'purity_id' => $purityByCode[$b['purity']] ?? null,
+                'qty' => 1,
+                'weight' => $b['weight'],
+                'rate_per_gram' => $b['rate'],
+                'tax_rate' => 3,
+            ];
+        }
+
+        $purchaseIds[] = PurchaseService::create([
+            'supplier_id' => $batch['vendor'],
+            'purchase_date' => $ago($batch['days']),
+            'bill_ref' => $batch['ref'],
+            'items' => $lines,
+            'notes' => 'Stock replenishment',
+        ], $user->id);
+    }
+
+    // a karigar job-work bill — service only, no stock
+    if ($karigarVendors !== []) {
+        $purchaseIds[] = PurchaseService::create([
+            'supplier_id' => $karigarVendors[0],
+            'purchase_date' => $ago(5),
+            'bill_ref' => 'JOB/2026/318',
+            'items' => [
+                ['kind' => 'service', 'description' => 'Making charges — bridal set', 'amount' => 48500, 'tax_rate' => 5],
+                ['kind' => 'service', 'description' => 'Polishing & finishing — 14 pieces', 'amount' => 9800, 'tax_rate' => 5],
+            ],
+            'notes' => 'Karigar job work for the month',
+        ], $user->id);
+    }
+
+    return count($purchaseIds) . ' purchases, ' . $pieces . ' new pieces';
+});
+
+// ------------------------------------------------------------------ vendor payments
+step('Vendor payments (part-settled)', function () use ($user, $ago, $purchaseIds): string {
+    $bank = (int) (Database::fetchValue('SELECT id FROM bank_accounts ORDER BY id LIMIT 1') ?? 0);
+    $paid = 0;
+    foreach ($purchaseIds as $i => $pid) {
+        $purchase = Database::fetchOne(
+            'SELECT supplier_id, grand_total, paid_amount FROM purchases WHERE id = :id',
+            ['id' => $pid]
+        );
+        if ($purchase === null) {
+            continue;
+        }
+        $due = (float) $purchase['grand_total'] - (float) $purchase['paid_amount'];
+        if ($due <= 1) {
+            continue;
+        }
+        // leave the newest bill fully outstanding so the payables report has teeth
+        $share = [1.0, 0.6, 0.0, 1.0][$i] ?? 0.5;
+        if ($share <= 0) {
+            continue;
+        }
+        PaymentService::payVendor(
+            supplierId: (int) $purchase['supplier_id'],
+            purchaseId: $pid,
+            amount: round($due * $share, 2),
+            mode: $share >= 1.0 ? 'bank' : 'upi',
+            bankAccountId: $share >= 1.0 && $bank > 0 ? $bank : null,
+            refNo: 'NEFT' . (830041 + $i),
+            date: $ago(1),
+            userId: $user->id,
+            notes: $share >= 1.0 ? 'Bill settled in full' : 'Part payment'
+        );
+        $paid++;
+    }
+    return $paid . ' payments';
+});
+
+// ------------------------------------------------------------------ sales
+/** Grab tagged pieces that are actually on the shelf right now. */
+$takeStock = static function (int $n) use (&$soldGuard): array {
+    return Database::fetchAll(
+        "SELECT i.id, i.name, i.net_weight, i.gross_weight, i.metal, i.purity_id
+           FROM inventory_items i
+          WHERE i.tracking = 'tagged' AND i.status = 'in_stock' AND i.is_active = 1
+            AND i.net_weight > 0 AND i.purity_id IS NOT NULL
+          ORDER BY i.id LIMIT $n"
+    );
+};
+
+step('Finalised bills + receipts', function () use ($noSales, $user, $ago, $today, $customerIds, $takeStock, $purityByCode): string {
+    if ($noSales) {
+        return 'skipped (--no-sales)';
+    }
+    $bank = (int) (Database::fetchValue('SELECT id FROM bank_accounts ORDER BY id LIMIT 1') ?? 0);
+
+    // [days ago, customer index or null for walk-in, pieces, settlement, old metal?]
+    $plan = [
+        ['days' => 12, 'ci' => 0,    'pieces' => 2, 'settle' => 'full',    'mode' => 'upi',   'old' => false],
+        ['days' => 10, 'ci' => null, 'pieces' => 1, 'settle' => 'full',    'mode' => 'cash',  'old' => false],
+        ['days' => 8,  'ci' => 1,    'pieces' => 2, 'settle' => 'partial', 'mode' => 'cash',  'old' => true],
+        ['days' => 6,  'ci' => 2,    'pieces' => 1, 'settle' => 'full',    'mode' => 'card',  'old' => false],
+        ['days' => 4,  'ci' => 3,    'pieces' => 1, 'settle' => 'credit',  'mode' => 'cash',  'old' => false],
+        ['days' => 3,  'ci' => 4,    'pieces' => 2, 'settle' => 'partial', 'mode' => 'bank',  'old' => false],
+        ['days' => 1,  'ci' => 5,    'pieces' => 1, 'settle' => 'full',    'mode' => 'upi',   'old' => true],
+        ['days' => 0,  'ci' => 6,    'pieces' => 2, 'settle' => 'full',    'mode' => 'cash',  'old' => false],
+        ['days' => 0,  'ci' => null, 'pieces' => 1, 'settle' => 'full',    'mode' => 'upi',   'old' => false],
+        ['days' => 0,  'ci' => 7,    'pieces' => 1, 'settle' => 'credit',  'mode' => 'cash',  'old' => false],
+    ];
+
+    $walkins = [['Ramesh Joshi', '9867001122'], ['Kavita Rane', '9867003344']];
+    $made = 0;
+
+    foreach ($plan as $i => $p) {
+        $stock = $takeStock($p['pieces']);
+        if (count($stock) < $p['pieces']) {
+            break;   // shelf is empty — stop rather than write a bogus bill
+        }
+
+        $walkIn = $p['ci'] === null;
+        $customerId = $walkIn ? null : ($customerIds[$p['ci']] ?? $customerIds[0]);
+        $billDate = $ago($p['days']);
+
+        $draft = [
+            'customer_id' => $customerId,
+            'invoice_date' => $billDate,
+            'price_mode' => $i % 4 === 3 ? 'inclusive' : 'exclusive',
+            'discount' => $i % 3 === 0 ? 1500 : 0,
+            'items' => array_map(static fn (array $s): array => ['item_id' => (int) $s['id'], 'qty' => 1], $stock),
+            'notes' => $walkIn ? 'Counter sale' : null,
+        ];
+        if ($walkIn) {
+            [$draft['walkin_name'], $draft['walkin_phone']] = $walkins[$i % count($walkins)];
+        }
+        $invoiceId = InvoiceDraft::save(null, $draft, $user->id);
+        $grand = (float) Database::fetchValue('SELECT grand_total FROM invoices WHERE id = :id', ['id' => $invoiceId]);
+
+        // Old metal is a credit against the bill, so it has to be sized against
+        // the bill's own value — a big exchange on a small silver piece would
+        // drive the total negative and the voucher would (rightly) be refused.
+        if ($p['old'] && isset($purityByCode['22K']) && $grand > 50000) {
+            $rate = RateService::rateFor($purityByCode['22K'], $billDate)['rate'] ?? 0.0;
+            $deduction = 8.0;
+            if ($rate > 0) {
+                $targetValue = $grand * 0.15;
+                $draft['old_metal'] = [[
+                    'metal' => 'gold',
+                    'purity_id' => $purityByCode['22K'],
+                    'description' => 'Old gold bangle taken in exchange',
+                    'gross_weight' => round($targetValue / ($rate * (1 - $deduction / 100)), 3),
+                    'deduction_pct' => $deduction,
+                ]];
+                InvoiceDraft::save($invoiceId, $draft, $user->id);
+                $grand = (float) Database::fetchValue('SELECT grand_total FROM invoices WHERE id = :id', ['id' => $invoiceId]);
+            }
+        }
+
+        $payments = [];
+        // a walk-in must leave nothing outstanding — BillingService enforces it
+        $share = $walkIn ? 1.0 : match ($p['settle']) {
+            'full' => 1.0,
+            'partial' => 0.45,
+            default => 0.0,
+        };
+        if ($share > 0) {
+            $payments[] = [
+                'amount' => round($grand * $share, 2),
+                'mode' => $p['mode'],
+                'bank_account_id' => in_array($p['mode'], ['bank', 'card'], true) && $bank > 0 ? $bank : null,
+                'ref_no' => $p['mode'] === 'upi' ? 'UPI' . (7710004 + $i) : null,
+            ];
+        }
+
+        BillingService::finalize($invoiceId, ['payments' => $payments], $user->id);
+
+        // one part-paid bill gets a follow-up receipt a couple of days later
+        if ($p['settle'] === 'partial' && $i === 2 && $customerId !== null) {
+            PaymentService::receive(
+                invoiceId: $invoiceId,
+                customerId: $customerId,
+                amount: round($grand * 0.30, 2),
+                mode: 'upi',
+                bankAccountId: null,
+                refNo: 'UPI7710990',
+                date: $ago(max(0, $p['days'] - 3)),
+                userId: $user->id,
+                notes: 'Balance instalment'
+            );
+        }
+        $made++;
+    }
+
+    return $made . ' bills';
+});
+
+// a cancelled bill so the cancel/reversal path is visible in the UI
+step('Cancelled bill (reversal path)', function () use ($noSales, $user, $takeStock): string {
+    if ($noSales) {
+        return 'skipped (--no-sales)';
+    }
+    $stock = $takeStock(1);
+    if ($stock === []) {
+        return 'skipped — no stock';
+    }
+    $invoiceId = InvoiceDraft::save(null, [
+        'customer_id' => null,
+        'walkin_name' => 'Nikhil Bhatt',
+        'walkin_phone' => '9867009900',
+        'invoice_date' => date('Y-m-d'),
+        'items' => [['item_id' => (int) $stock[0]['id'], 'qty' => 1]],
+    ], $user->id);
+    $grand = (float) Database::fetchValue('SELECT grand_total FROM invoices WHERE id = :id', ['id' => $invoiceId]);
+    BillingService::finalize($invoiceId, [
+        'payments' => [['amount' => $grand, 'mode' => 'cash']],
+    ], $user->id);
+    BillingService::cancel($invoiceId, 'Customer changed their mind — piece returned to stock.', $user->id);
+    return '1 cancelled';
+});
+
+// ------------------------------------------------------------------ held drafts
+step('Held bills (drafts at the counter)', function () use ($noSales, $user, $customerIds, $takeStock): string {
+    if ($noSales) {
+        return 'skipped (--no-sales)';
+    }
+    $stock = $takeStock(6);
+    if ($stock === []) {
+        return 'skipped — no stock';
+    }
+    $chunks = array_chunk($stock, 2);
+    $n = 0;
+    foreach ($chunks as $i => $chunk) {
+        InvoiceDraft::save(null, [
+            'customer_id' => $customerIds[$i] ?? null,
+            'walkin_name' => isset($customerIds[$i]) ? null : 'Counter ' . ($i + 1),
+            'invoice_date' => date('Y-m-d'),
+            'items' => array_map(static fn (array $s): array => ['item_id' => (int) $s['id'], 'qty' => 1], $chunk),
+            'notes' => 'Held at the counter — customer is still deciding.',
+        ], $user->id);
+        $n++;
+    }
+    return $n . ' drafts';
+});
+
+// ------------------------------------------------------------------ estimates
+step('Estimates / quotations', function () use ($user, $ago, $today, $customerIds, $purityByCode): string {
+    $rate22 = RateService::rateFor($purityByCode['22K'] ?? 0, $today)['rate'] ?? 6957.0;
+    $rate18 = RateService::rateFor($purityByCode['18K'] ?? 0, $today)['rate'] ?? 5579.0;
+
+    $quotes = [
+        ['days' => 1, 'ci' => 0, 'walkin' => null, 'action' => 'open', 'items' => [
+            ['description' => 'Bridal necklace set — custom, 22K', 'purity_code' => '22K', 'net_weight' => 78.500, 'rate_per_gram' => $rate22, 'making_type' => 'per_gram', 'making_value' => 780],
+            ['description' => 'Matching jhumka pair — 22K', 'purity_code' => '22K', 'net_weight' => 18.200, 'rate_per_gram' => $rate22, 'making_type' => 'per_gram', 'making_value' => 620],
+        ]],
+        ['days' => 2, 'ci' => 2, 'walkin' => null, 'action' => 'open', 'items' => [
+            ['description' => 'Diamond pendant — 18K, 0.75 ct', 'purity_code' => '18K', 'net_weight' => 6.400, 'rate_per_gram' => $rate18, 'making_type' => 'fixed', 'making_value' => 42000],
+        ]],
+        ['days' => 3, 'ci' => null, 'walkin' => ['Sanjay Kulkarni', '9867221100'], 'action' => 'open', 'items' => [
+            ['description' => 'Gents kada — 22K plain', 'purity_code' => '22K', 'net_weight' => 38.000, 'rate_per_gram' => $rate22, 'making_type' => 'per_gram', 'making_value' => 480],
+        ]],
+        ['days' => 12, 'ci' => 3, 'walkin' => null, 'action' => 'open', 'items' => [   // past its validity → shows as expired
+            ['description' => 'Mangalsutra — long chain, 22K', 'purity_code' => '22K', 'net_weight' => 26.300, 'rate_per_gram' => $rate22, 'making_type' => 'per_gram', 'making_value' => 600],
+        ]],
+        ['days' => 4, 'ci' => 1, 'walkin' => null, 'action' => 'cancel', 'items' => [
+            ['description' => 'Gold bar 50 g — 999', 'purity_code' => '24K', 'net_weight' => 50.000, 'rate_per_gram' => 7340, 'making_type' => 'fixed', 'making_value' => 1200],
+        ]],
+        ['days' => 2, 'ci' => 4, 'walkin' => null, 'action' => 'convert', 'items' => [
+            ['description' => 'Gold chain 22" — 22K rope', 'purity_code' => '22K', 'net_weight' => 22.400, 'rate_per_gram' => $rate22, 'making_type' => 'per_gram', 'making_value' => 420],
+        ]],
+    ];
+
+    $made = 0;
+    $converted = 0;
+    foreach ($quotes as $q) {
+        $body = [
+            'customer_id' => $q['ci'] !== null ? ($customerIds[$q['ci']] ?? null) : null,
+            'estimate_date' => $ago($q['days']),
+            'price_mode' => 'exclusive',
+            'discount' => 0,
+            'items' => $q['items'],
+            'notes' => 'Quotation — rate valid till the date shown.',
+        ];
+        if ($q['walkin'] !== null) {
+            [$body['walkin_name'], $body['walkin_phone']] = $q['walkin'];
+        }
+        $id = EstimateService::save(null, $body, $user->id);
+        $made++;
+
+        if ($q['action'] === 'cancel') {
+            EstimateService::cancel($id, $user->id);
+        } elseif ($q['action'] === 'convert') {
+            // becomes a draft bill, then a real one — a quote the customer accepted
+            $invoiceId = EstimateService::convert($id, true, $user->id);
+            $grand = (float) Database::fetchValue('SELECT grand_total FROM invoices WHERE id = :id', ['id' => $invoiceId]);
+            BillingService::finalize($invoiceId, [
+                'payments' => [['amount' => $grand, 'mode' => 'upi', 'ref_no' => 'UPI7712345']],
+            ], $user->id);
+            $converted++;
+        }
+    }
+
+    return $made . ' estimates (' . $converted . ' converted to a bill)';
+});
+
+// ------------------------------------------------------------------ on-account receipt
+step('On-account receipt (advance)', function () use ($user, $customerIds): string {
+    if ($customerIds === []) {
+        return 'skipped';
+    }
+    PaymentService::receive(
+        invoiceId: null,
+        customerId: $customerIds[0],
+        amount: 50000,
+        mode: 'bank',
+        bankAccountId: (int) (Database::fetchValue('SELECT id FROM bank_accounts ORDER BY id LIMIT 1') ?: 0) ?: null,
+        refNo: 'ADV/2026/018',
+        date: date('Y-m-d'),
+        userId: $user->id,
+        notes: 'Advance towards the bridal order'
+    );
+    return '1 advance';
+});
+
+// ------------------------------------------------------------------ expenses
+step('Expenses', function () use ($user, $ago): string {
+    $cat = static fn (string $n): int => (int) (Database::fetchValue(
+        'SELECT id FROM expense_categories WHERE name = :n AND is_system = 0 LIMIT 1',
+        ['n' => $n]
+    ) ?? 0);
+
+    $rows = [
+        ['Rent', 85000, 'Showroom rent — Zaveri Bazaar', 'Kalbadevi Estates', 'bank', 0, 'fixed'],
+        ['Rent', 85000, 'Showroom rent — previous month', 'Kalbadevi Estates', 'bank', 31, 'fixed'],
+        ['Utilities', 14200, 'Electricity bill', 'BEST', 'upi', 4, 'variable'],
+        ['Utilities', 3100, 'Internet & telephone', 'Airtel', 'upi', 9, 'variable'],
+        ['Utilities', 6800, 'Water & maintenance', 'Society', 'cash', 18, 'variable'],
+        ['Karigar Charges', 24500, 'Setting charges — 9 pieces', 'Shree Jewel Craft', 'cash', 6, 'variable'],
+        ['Karigar Charges', 11800, 'Rhodium & polish work', 'Sai Karigar Works', 'upi', 13, 'variable'],
+        ['Marketing', 32000, 'Festival campaign — Instagram & Meta ads', 'Digital agency', 'card', 8, 'variable'],
+        ['Marketing', 9500, 'Newspaper insert — local edition', 'Sakal Media', 'bank', 21, 'variable'],
+        ['Office Supplies', 4300, 'Boxes, pouches & billing stationery', 'Amrut Pack & Print', 'cash', 3, 'variable'],
+        ['Office Supplies', 2650, 'Hallmarking pouches', 'Amrut Pack & Print', 'cash', 16, 'variable'],
+        ['Utilities', 1900, 'Diesel — generator', 'HP Petrol Pump', 'cash', 1, 'variable'],
+    ];
+
+    $bank = (int) (Database::fetchValue('SELECT id FROM bank_accounts ORDER BY id LIMIT 1') ?? 0);
+    $n = 0;
+    foreach ($rows as [$catName, $amount, $desc, $paidTo, $mode, $days, $type]) {
+        $categoryId = $cat($catName);
+        if ($categoryId === 0) {
+            continue;
+        }
+        ExpenseService::create([
+            'category_id' => $categoryId,
+            'amount' => $amount,
+            'description' => $desc,
+            'paid_to' => $paidTo,
+            'payment_mode' => $mode,
+            // anything other than cash must name the account it was paid from
+            'bank_account_id' => $mode !== 'cash' && $bank > 0 ? $bank : null,
+            'expense_date' => $ago($days),
+            'type' => $type,
+        ], $user);
+        $n++;
+    }
+    return $n . ' expenses';
+});
+
+// ------------------------------------------------------------------ stock adjustment
+step('Stock adjustment (shortage)', function () use ($user): string {
+    $item = Database::fetchOne(
+        "SELECT id, metal FROM inventory_items
+          WHERE tracking = 'bulk' AND current_stock > 5 AND metal = 'silver' ORDER BY id DESC LIMIT 1"
+    );
+    if ($item === null) {
+        return 'skipped — no bulk stock';
+    }
+    $itemId = (int) $item['id'];
+
+    Database::transaction(static function () use ($itemId, $item, $user): void {
+        $weight = 3.500;
+        $costPerGram = StockService::avgCostPerGram($itemId);
+        $value = round($costPerGram * $weight, 2);
+
+        $voucherId = null;
+        if ($value > 0.005) {
+            $voucherId = \CRM\Accounting\VoucherService::post(
+                vtype: 'adjustment',
+                vdate: date('Y-m-d'),
+                entries: [
+                    ['ledger_id' => \CRM\Accounting\Ledgers::system('stock_adjust'), 'dr' => $value],
+                    ['ledger_id' => \CRM\Accounting\Ledgers::system('inventory', (string) $item['metal']), 'cr' => $value],
+                ],
+                narration: 'Stock adjustment — physical count shortage',
+                refType: 'stock_adjustment',
+                refId: $itemId,
+                userId: $user->id
+            );
+        }
+
+        StockService::record(
+            itemId: $itemId,
+            direction: 'out',
+            reason: 'adjustment',
+            qty: 1,
+            weight: $weight,
+            value: $value,
+            voucherId: $voucherId,
+            notes: 'Adjustment ' . NumberSequence::next('adjustment'),
+            adjustmentReason: 'Physical count shortage — dust loss at the polishing bench.',
+            userId: $user->id
+        );
+
+        Audit::log($user->id, 'stock.adjust', 'inventory_items', $itemId, null, [
+            'direction' => 'out',
+            'weight' => $weight,
+            'reason' => 'Physical count shortage',
+        ]);
+    });
+
+    return '1 adjustment';
+});
+
+// ------------------------------------------------------------------ done
+Database::execute(
+    "INSERT INTO settings (skey, svalue) VALUES ('demo_seeded_at', :v)
+     ON DUPLICATE KEY UPDATE svalue = :v2",
+    ['v' => date('Y-m-d H:i:s'), 'v2' => date('Y-m-d H:i:s')]
+);
+
+echo "\nSummary\n";
+foreach ([
+    'customers' => 'Customers',
+    'inventory_items' => 'Items',
+    'purchases' => 'Purchases',
+    'invoices' => 'Bills',
+    'estimates' => 'Estimates',
+    'invoice_payments' => 'Receipts',
+    'vendor_payments' => 'Vendor payments',
+    'expenses' => 'Expenses',
+    'vouchers' => 'Vouchers',
+] as $table => $label) {
+    echo '  ' . str_pad($label, 18) . Database::fetchValue("SELECT COUNT(*) FROM `$table`") . "\n";
+}
+echo '  ' . str_pad('Pieces in stock', 18)
+    . Database::fetchValue("SELECT COUNT(*) FROM inventory_items WHERE tracking = 'tagged' AND status = 'in_stock'") . "\n";
+
+echo "\nDemo data seeded. Log in as admin / admin123.\n";
+echo "Now run: php cli/verify-ledger.php\n";

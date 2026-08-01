@@ -15,15 +15,34 @@ use CRM\Security\JwtService;
 final class AuthService
 {
     /**
+     * Collation for every username comparison.
+     *
+     * Usernames are case-SENSITIVE — `admin` and `Admin` are separate accounts —
+     * so each comparison is pinned to the binary collation rather than relying on
+     * the column's. It matches `users.username`'s own collation, so the unique
+     * index is still used.
+     *
+     * It must be applied to the COLUMN, not the placeholder: PDO binds string
+     * parameters with the `binary` charset, and `:param COLLATE utf8mb4_bin` is
+     * rejected outright ("COLLATION 'utf8mb4_bin' is not valid for CHARACTER SET
+     * 'binary'").
+     */
+    private const USERNAME_COLLATION = 'utf8mb4_bin';
+
+    /**
      * Verify credentials (username OR email OR mobile), create a session,
      * set auth cookies. Returns the public user payload + csrf token.
+     *
+     * The username arm is case-sensitive; email and mobile are not, matching how
+     * those identifiers are conventionally compared.
      */
     public static function login(string $identifier, string $password, bool $rememberMe): array
     {
+        $username = 'username COLLATE ' . self::USERNAME_COLLATION;
         $user = Database::fetchOne(
             'SELECT * FROM users
-             WHERE (username = :u OR email = :e OR mobile = :m) AND is_active = 1
-             ORDER BY (username = :u2) DESC
+             WHERE (' . $username . ' = :u OR email = :e OR mobile = :m) AND is_active = 1
+             ORDER BY (' . $username . ' = :u2) DESC
              LIMIT 1',
             ['u' => $identifier, 'e' => $identifier, 'm' => $identifier, 'u2' => $identifier]
         );
