@@ -17,8 +17,9 @@ import { cn } from "@/shared/utils/cn";
 import { formatCurrency, formatWeight } from "@/shared/utils/format";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Lock, Search, SlidersHorizontal } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { invalidateMoneyQueries } from "@/shared/api/invalidate-money";
 
 const IN_REASONS = ["Found during stock count", "Returned by karigar", "Correction of an earlier entry"];
 const OUT_REASONS = ["Short in stock count", "Damaged / broken", "Sent for melting", "Correction of an earlier entry"];
@@ -43,8 +44,8 @@ export default function StockAdjustPage() {
   const allowed = can("inventory.adjust");
 
   const { data: listData, isFetching: searching } = useQuery({
-    queryKey: ["stock", "items", { search, picker: "adjust" }],
-    queryFn: () => stockApi.items({ search: search || undefined, status: "in_stock" }),
+    queryKey: ["stock", "items", { search, picker: "adjust", per_page: 60 }],
+    queryFn: () => stockApi.items({ search: search || undefined, status: "in_stock", per_page: 60 }),
     enabled: allowed,
   });
 
@@ -55,6 +56,7 @@ export default function StockAdjustPage() {
   });
 
   const availability = detailData?.item.availability;
+  const isTagged = picked?.tracking === "tagged";
   const results = listData?.items ?? [];
   const purities = listData?.purities ?? [];
   const estimatedValue = Number(weight || 0) * Number(ratePerGram || 0);
@@ -75,6 +77,15 @@ export default function StockAdjustPage() {
     setReason("");
     setError(null);
   };
+
+  // a tagged piece can only leave, whole: force the form into that shape
+  useEffect(() => {
+    if (!isTagged) return;
+    setDirection("out");
+    setQty("1");
+    setRatePerGram("");
+    setWeight(availability ? String(availability.weight) : "");
+  }, [isTagged, availability]);
 
   const validate = (): string | null => {
     if (!picked) return "Choose the item you want to correct.";
@@ -112,6 +123,7 @@ export default function StockAdjustPage() {
       toast.success("Stock corrected.");
       void queryClient.invalidateQueries({ queryKey: ["stock"] });
       void queryClient.invalidateQueries({ queryKey: ["inventory"] });
+      invalidateMoneyQueries(queryClient);
       setConfirmOpen(false);
       reset();
     } catch (e) {
@@ -235,23 +247,31 @@ export default function StockAdjustPage() {
                 </div>
               </div>
 
-              <div className="flex rounded-pill bg-background p-1">
-                {(["in", "out"] as const).map((d) => (
-                  <button
-                    key={d}
-                    onClick={() => {
-                      setDirection(d);
-                      if (d === "in" && picked && !ratePerGram) setRatePerGram(defaultRateForItem(picked));
-                    }}
-                    className={cn(
-                      "flex-1 rounded-pill py-2 text-sm font-semibold transition-colors",
-                      direction === d ? "bg-card text-primary-strong shadow-card" : "text-muted-foreground",
-                    )}
-                  >
-                    {d === "in" ? "Add to stock" : "Remove from stock"}
-                  </button>
-                ))}
-              </div>
+              {isTagged ? (
+                <p className="rounded-card bg-background px-4 py-3 text-sm text-muted-foreground">
+                  A tagged piece is one item, so it can only be written off whole — the full
+                  {" "}{formatWeight(availability?.weight ?? 0)} goes out. To bring a piece in, record its
+                  purchase or opening stock instead.
+                </p>
+              ) : (
+                <div className="flex rounded-pill bg-background p-1">
+                  {(["in", "out"] as const).map((d) => (
+                    <button
+                      key={d}
+                      onClick={() => {
+                        setDirection(d);
+                        if (d === "in" && picked && !ratePerGram) setRatePerGram(defaultRateForItem(picked));
+                      }}
+                      className={cn(
+                        "flex-1 rounded-pill py-2 text-sm font-semibold transition-colors",
+                        direction === d ? "bg-card text-primary-strong shadow-card" : "text-muted-foreground",
+                      )}
+                    >
+                      {d === "in" ? "Add to stock" : "Remove from stock"}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               <div className={cn("grid gap-5", direction === "in" ? "sm:grid-cols-3" : "sm:grid-cols-2")}>
                 <div>
@@ -264,12 +284,22 @@ export default function StockAdjustPage() {
                     value={weight}
                     onChange={(e) => setWeight(e.target.value)}
                     placeholder="0.000"
+                    disabled={isTagged}
                   />
-                  <p className="mt-1.5 text-xs text-muted-foreground">In grams, to three decimals.</p>
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    {isTagged ? "The whole piece goes out." : "In grams, to three decimals."}
+                  </p>
                 </div>
                 <div>
                   <Label htmlFor="aj_qty">Pieces</Label>
-                  <Input id="aj_qty" inputMode="decimal" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="1" />
+                  <Input
+                    id="aj_qty"
+                    inputMode="decimal"
+                    value={qty}
+                    onChange={(e) => setQty(e.target.value)}
+                    placeholder="1"
+                    disabled={isTagged}
+                  />
                   <p className="mt-1.5 text-xs text-muted-foreground">
                     {picked.tracking === "tagged" ? "A tagged piece is always 1." : "How many units of the pool."}
                   </p>

@@ -10,10 +10,11 @@ import { Card } from "@/shared/ui/card";
 import { cn } from "@/shared/utils/cn";
 import { formatCurrency } from "@/shared/utils/format";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronLeft, ChevronRight, Lock, Plus } from "lucide-react";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Lock, Plus, Wallet } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { invalidateMoneyQueries } from "@/shared/api/invalidate-money";
 
 // fiscal year runs Apr → Mar; columns in that order
 const FY_MONTHS = [
@@ -22,6 +23,13 @@ const FY_MONTHS = [
   { m: 10, label: "Oct" }, { m: 11, label: "Nov" }, { m: 12, label: "Dec" },
   { m: 1, label: "Jan" }, { m: 2, label: "Feb" }, { m: 3, label: "Mar" },
 ];
+
+/**
+ * The tree guide for everything nested under a category: a continuous vertical
+ * rule starting under the category's chevron, so a line item reads as belonging
+ * to the heading above it instead of floating in the table.
+ */
+const CHILD_INDENT = "ml-[26px] border-l border-border pl-4";
 
 function defaultFyYear() {
   const now = new Date();
@@ -49,6 +57,7 @@ export default function MonthlyTrackerPage() {
   const cellOf = (itemId: number, m: number) => data?.tracker?.[itemId]?.[cellYear(m)]?.[m];
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["expenses"] });
+  invalidateMoneyQueries(queryClient);
 
   const unpay = async (itemId: number, m: number) => {
     if (!window.confirm("Reverse this payment? The linked expense will be removed.")) return;
@@ -306,7 +315,13 @@ function CategoryRows({
   onUnpay,
   onAddItem,
 }: {
-  cat: { id: number; name: string; is_system: 0 | 1; items: { id: number; name: string; amount: string }[] };
+  cat: {
+    id: number;
+    name: string;
+    is_system: 0 | 1;
+    system_key: string | null;
+    items: { id: number; name: string; amount: string }[];
+  };
   months: { m: number; label: string }[];
   cellOf: (itemId: number, m: number) => { paid_amount: string; payment_status: string } | undefined;
   canPay: boolean;
@@ -316,8 +331,16 @@ function CategoryRows({
   onUnpay: (itemId: number, m: number) => void;
   onAddItem?: (categoryId: number) => void;
 }) {
+  const { can } = usePermissions();
   const [open, setOpen] = useState(false);
   const locked = cat.is_system === 1;
+
+  // Salaries is a system category because its line items come from payroll, not
+  // from someone typing a cost here. A padlock states that as a prohibition and
+  // leaves the user nowhere to go; the place the figures ARE editable is the
+  // payroll page, so point at it instead. Falls back to the padlock when the
+  // user cannot open payroll, rather than offering a link that would be refused.
+  const payrollLink = locked && cat.system_key === "SALARY" && can("hr.payroll.read");
 
   const expectedMonthly = cat.items.reduce((sum, it) => sum + Number(it.amount), 0);
   const monthPaid = (m: number) =>
@@ -340,7 +363,15 @@ function CategoryRows({
               <span className="truncate">{cat.name}</span>
               <span className="font-normal normal-case text-muted-foreground">({cat.items.length})</span>
             </button>
-            {locked ? (
+            {payrollLink ? (
+              <Link
+                href="/hr/payroll"
+                title="Salaries come from payroll — open it to add or change them"
+                className="inline-flex shrink-0 items-center gap-1 rounded-pill border border-primary/40 bg-primary-soft px-2 py-0.5 text-[10px] font-semibold text-primary-strong transition-colors hover:border-primary hover:brightness-105"
+              >
+                <Wallet className="h-3 w-3" aria-hidden /> Payroll
+              </Link>
+            ) : locked ? (
               <span
                 className="inline-flex shrink-0 items-center gap-1 rounded-pill border border-border px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground"
                 title="System category — managed automatically"
@@ -352,7 +383,7 @@ function CategoryRows({
                 onClick={() => onAddItem(cat.id)}
                 aria-label={`Add a cost under ${cat.name}`}
                 title={`Add a cost under ${cat.name}`}
-                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-primary-soft hover:text-primary-strong"
+                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:border-primary hover:bg-primary-soft hover:text-primary-strong"
               >
                 <Plus className="h-3.5 w-3.5" aria-hidden />
               </button>
@@ -410,33 +441,38 @@ function CategoryRows({
       </tr>
       {open && cat.items.length === 0 ? (
         <tr className="border-b border-border/40">
-          <td colSpan={13} className="px-9 py-3 text-xs text-muted-foreground">
+          <td className="sticky left-0 z-10 bg-card p-0 text-left">
+            <div className={cn(CHILD_INDENT, "py-3 pr-4 text-xs text-muted-foreground")}>
+              Nothing under this heading yet.
+            </div>
+          </td>
+          <td colSpan={months.length} className="bg-card px-4 py-3 text-xs text-muted-foreground">
             {!locked && onAddItem ? (
-              <>
-                No line items yet —{" "}
-                <button onClick={() => onAddItem(cat.id)} className="font-medium text-primary-strong hover:underline">
-                  + add a line item
-                </button>{" "}
-                to pay this cost month-by-month.
-              </>
+              "Add a line item below to pay it month by month."
             ) : (
               <>
-                No line items yet — add them in{" "}
+                Add them in{" "}
                 <Link href="/expenses/categories" className="text-primary-strong hover:underline">Categories</Link>{" "}
-                to track this cost month-by-month.
+                to track this cost month by month.
               </>
             )}
           </td>
         </tr>
       ) : null}
       {open && cat.items.map((it) => (
-        <tr key={it.id} className="border-b border-border/40 last:border-0 hover:bg-background/40">
-          <td className="sticky left-0 z-10 bg-card px-4 py-2.5 text-left">
-            <div className="flex items-center gap-2 overflow-hidden whitespace-nowrap">
+        <tr key={it.id} className="group border-b border-border/40 last:border-0 hover:bg-background/40">
+          <td className="sticky left-0 z-10 bg-card p-0 text-left transition-colors group-hover:bg-background/40">
+            <div className={cn(CHILD_INDENT, "flex items-center gap-2 overflow-hidden whitespace-nowrap py-2.5 pr-4")}>
               <span className="min-w-0 truncate text-sm font-medium text-foreground">{it.name}</span>
               {Number(it.amount) > 0 ? (
-                <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{formatCurrency(it.amount)}</span>
-              ) : null}
+                <span className="shrink-0 rounded-pill bg-background px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+                  {formatCurrency(it.amount)}/mo
+                </span>
+              ) : (
+                // an unpriced item is skipped by "pay all" and shows "pay" in every
+                // cell — say so rather than leaving the row looking merely blank
+                <span className="shrink-0 text-[11px] font-medium text-warning-strong">no amount set</span>
+              )}
             </div>
           </td>
           {months.map((mo) => {
@@ -494,13 +530,19 @@ function CategoryRows({
           })}
         </tr>
       ))}
-      {open && cat.items.length > 0 && !locked && onAddItem ? (
+      {open && !locked && onAddItem ? (
         <tr className="border-b border-border/40">
-          <td colSpan={13} className="px-9 py-2">
-            <button onClick={() => onAddItem(cat.id)} className="text-xs font-medium text-primary-strong hover:underline">
-              + Add line item
-            </button>
+          <td className="sticky left-0 z-10 bg-card p-0">
+            <div className={cn(CHILD_INDENT, "py-1.5 pr-4")}>
+              <button
+                onClick={() => onAddItem(cat.id)}
+                className="inline-flex items-center gap-1.5 rounded-pill px-2 py-1 text-xs font-semibold text-primary-strong transition-colors hover:bg-primary-soft"
+              >
+                <Plus className="h-3.5 w-3.5" aria-hidden /> Add line item
+              </button>
+            </div>
           </td>
+          <td colSpan={months.length} className="bg-card" />
         </tr>
       ) : null}
     </>

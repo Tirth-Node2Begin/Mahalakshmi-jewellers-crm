@@ -1,6 +1,13 @@
 "use client";
 
-import { purityKey, ratesApi, type Metal, type Purity } from "@/features/rates/api";
+import {
+  purityKey,
+  ratesApi,
+  type Metal,
+  type Purity,
+  type RateFeedQuote,
+  type RateFeedStatus,
+} from "@/features/rates/api";
 import { metalLabel } from "@/features/stock/api";
 import { useMetals } from "@/features/stock/metal-select";
 import { usePermissions } from "@/lib/permissions";
@@ -13,7 +20,7 @@ import { Skeleton, SkeletonRows } from "@/shared/ui/skeleton";
 import { cn } from "@/shared/utils/cn";
 import { formatCurrency, formatDate, localDateString } from "@/shared/utils/format";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Check, TrendingUp } from "lucide-react";
+import { AlertTriangle, Check, Download, TrendingUp } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -34,10 +41,29 @@ export default function RatesPage() {
   });
   const { data: metalsData } = useMetals();
 
+  /** Fetched-but-not-yet-saved rates, by purity id. */
+  const fetched = useMemo(() => {
+    const map = new Map<number, RateFeedQuote>();
+    for (const q of data?.feed?.quotes ?? []) {
+      if (q.status === "staged") map.set(q.purity_id, q);
+    }
+    return map;
+  }, [data]);
+
   useEffect(() => {
     if (!data || hydratedFor.current === data.date) return;
     hydratedFor.current = data.date;
-    setValues(Object.fromEntries(data.purities.map((p) => [p.id, p.rate_per_gram ?? ""])));
+    // A fetched rate PRE-FILLS the box; it is not saved. Whatever is already
+    // saved for the day wins, so a rate someone typed is never overwritten by
+    // the feed. Nothing reaches billing until "Save Today's Rates" is pressed.
+    setValues(
+      Object.fromEntries(
+        data.purities.map((p) => {
+          const staged = data.feed?.quotes.find((q) => q.purity_id === p.id && q.status === "staged");
+          return [p.id, p.rate_per_gram ?? staged?.rate_per_gram ?? ""];
+        }),
+      ),
+    );
   }, [data]);
 
   /** Latest rate BEFORE this day, per purity — shown as the placeholder hint. */
@@ -50,6 +76,17 @@ export default function RatesPage() {
     }
     return map;
   }, [data, date]);
+
+  const fetchNow = useMutation({
+    mutationFn: () => ratesApi.feedFetch(date),
+    onSuccess: (r) => {
+      if ((r.staged ?? 0) > 0) toast.success(r.message);
+      else toast.info(r.message);
+      hydratedFor.current = null; // let the new quotes re-fill the boxes
+      void queryClient.invalidateQueries({ queryKey: ["rates"] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Could not fetch the rates."),
+  });
 
   const save = useMutation({
     mutationFn: () => {
@@ -98,6 +135,14 @@ export default function RatesPage() {
     <div className="space-y-6">
       {/* Heading lives in the shell header (components/shell/page-header.tsx). */}
       <div className="flex flex-wrap items-center gap-3">
+        {/* The cron fills the boxes each morning; this is for the day it has not
+            run yet, or when IBJA publishes its afternoon rate. It only fills the
+            boxes — saving is still the button at the bottom. */}
+        {data?.feed?.enabled && canSet ? (
+          <Button variant="secondary" size="sm" loading={fetchNow.isPending} onClick={() => fetchNow.mutate()}>
+            <Download className="h-4 w-4" aria-hidden /> Fetch now
+          </Button>
+        ) : null}
         <div className="ml-auto flex items-center gap-2">
           <Label htmlFor="rate-date" className="mb-0">
             For
@@ -129,6 +174,19 @@ export default function RatesPage() {
                 : `Missing for ${formatDate(date)}: ${missingNames}. The other rates are set.`}
           </p>
         </div>
+      ) : null}
+
+      {/* Fetched rates are sitting in the boxes below, unsaved. This says so and
+          points at the one action that commits them. Null when the user lacks
+          rates.feed — the server does not send the block at all. */}
+      {!isLoading && fetched.size > 0 ? (
+        <RateFeedNotice
+          count={fetched.size}
+          quotes={[...fetched.values()]}
+          lastRun={data?.feed?.last_run ?? null}
+          sourceUrl={data?.feed?.source_url ?? ""}
+          canSave={canSet}
+        />
       ) : null}
 
       {!isLoading && data?.rates_set ? (
@@ -228,6 +286,90 @@ export default function RatesPage() {
       )}
 
       <RateHistory purities={data?.purities ?? []} history={data?.history ?? []} isLoading={isLoading} />
+    </div>
+  );
+}
+
+/**
+ * "These came from IBJA — check them, then save."
+ *
+ * The feed used to apply rates itself, behind its own button. It no longer
+ * does: the numbers are simply typed into the boxes for you, and the ordinary
+ * Save button is the only thing that writes them. One way to commit a rate, not
+ * two — and the person saving has seen every figure they are committing.
+ */
+function RateFeedNotice({
+  count,
+  quotes,
+  lastRun,
+  sourceUrl,
+  canSave,
+}: {
+  count: number;
+  quotes: RateFeedQuote[];
+  lastRun: RateFeedStatus["last_run"];
+  sourceUrl: string;
+  canSave: boolean;
+}) {
+  const when = lastRun ? new Date(lastRun.created_at.replace(" ", "T")) : null;
+  const time =
+    when && !Number.isNaN(when.getTime())
+      ? when.toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })
+      : null;
+
+  // Anything the sanity checks flagged is stated here rather than buried, since
+  // this is the last screen before the rate goes onto a bill.
+  const warnings = quotes.flatMap((q) => q.flags.map((f) => ({ ...f, name: `${q.metal} ${q.code}` })));
+  const blocking = warnings.filter((w) => w.severity === "block");
+
+  return (
+    <div className="flex items-start gap-3 rounded-card border border-primary/25 bg-primary-soft p-4">
+      <Download className="mt-0.5 h-5 w-5 shrink-0 text-primary-strong" aria-hidden />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-primary-strong">
+          {count} rate{count === 1 ? "" : "s"} filled in from IBJA{time ? ` at ${time}` : ""} — not saved yet.
+        </p>
+        <p className="mt-0.5 text-sm text-primary-strong/80">
+          {canSave
+            ? "Check the amounts below, change anything that looks wrong, then press Save Today's Rates."
+            : "Check the amounts below. Someone who can set rates needs to save them."}
+        </p>
+
+        {warnings.length > 0 ? (
+          <ul className="mt-2 space-y-1">
+            {warnings.map((w, i) => (
+              <li
+                key={`${w.code}-${i}`}
+                className={cn(
+                  "flex items-start gap-2 text-xs",
+                  w.severity === "block" ? "font-medium text-warning-strong" : "text-primary-strong/75",
+                )}
+              >
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+                <span>{w.message}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+        {blocking.length > 0 ? (
+          <p className="mt-2 text-xs font-semibold text-warning-strong">
+            Please correct {blocking.length === 1 ? "that figure" : "those figures"} by hand before saving — a saved rate
+            is stamped onto every bill of the day and cannot be changed afterwards.
+          </p>
+        ) : null}
+
+        {sourceUrl ? (
+          <a
+            href={sourceUrl}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="mt-1 inline-block text-xs text-primary-strong/70 underline hover:text-primary-strong"
+          >
+            see the source
+          </a>
+        ) : null}
+      </div>
     </div>
   );
 }

@@ -17,22 +17,61 @@ use CRM\Database\Database;
 final class AccountingRepository
 {
     /** Chart of accounts as a group tree with its ledgers attached. */
-    public static function chartOfAccounts(): array
+    /**
+     * The chart of accounts as a two-level tree, each ledger carrying its LIVE
+     * balance as on $asOn (default today).
+     *
+     * The balance is derived from the active voucher entries every time it is
+     * asked for — there is no stored running total to go stale, so a sale or a
+     * receipt shows up the moment it is posted. Without it the page could only
+     * show each ledger's setup-time opening balance, which told the owner
+     * nothing about how much cash was actually in the drawer.
+     */
+    public static function chartOfAccounts(?string $asOn = null, bool $gstVisibleOnly = false): array
     {
+        $asOn ??= date('Y-m-d');
+        $visibilitySql = $gstVisibleOnly ? ' AND NOT ' . self::nonGstSaleVoucherSql('v') : '';
+
+        $balances = [];
+        foreach (Database::fetchAll(
+            "SELECT e.ledger_id, ROUND(SUM(e.dr_amount - e.cr_amount), 2) AS net
+               FROM voucher_entries e
+               JOIN vouchers v ON v.id = e.voucher_id AND v.status = 'active'
+              WHERE v.vdate <= :as_on{$visibilitySql}
+              GROUP BY e.ledger_id",
+            ['as_on' => $asOn]
+        ) as $row) {
+            $balances[(int) $row['ledger_id']] = (float) $row['net'];
+        }
+
         $groups = Database::fetchAll(
             'SELECT id, name, parent_id, nature, is_system, sort_order
                FROM account_groups ORDER BY sort_order, name'
         );
+        // Only the PARTY sub-ledgers are hidden — one per customer and supplier,
+        // which would bury the chart of accounts under hundreds of names (they
+        // are reachable from the customer and vendor pages instead). Every other
+        // linked ledger is a real account the shop needs to see here: each bank
+        // account, and each named expense category.
         $ledgers = Database::fetchAll(
             "SELECT id, group_id, name, code, linked_type, linked_id, metal, is_system, is_active,
                     opening_balance, opening_type
                FROM ledger_accounts
-              WHERE linked_type IS NULL OR linked_id IS NULL   -- hide per-party sub-ledgers
+              WHERE linked_id IS NULL
+                 OR linked_type IS NULL
+                 OR linked_type NOT IN ('customer', 'vendor')
               ORDER BY name"
         );
 
         $byGroup = [];
         foreach ($ledgers as $l) {
+            // debit-positive internally, then reported as an absolute figure with
+            // its side — the way a ledger is actually read
+            $signed = (float) $l['opening_balance'] * ($l['opening_type'] === 'cr' ? -1 : 1)
+                + ($balances[(int) $l['id']] ?? 0.0);
+            $l['balance'] = round(abs($signed), 2);
+            $l['balance_type'] = $signed >= 0 ? 'dr' : 'cr';
+            $l['balance_as_on'] = $asOn;
             $byGroup[(int) $l['group_id']][] = $l;
         }
 

@@ -54,6 +54,8 @@ export interface StockItem {
   making_value: string;
   hsn_code: string | null;
   current_stock: string;
+  /** Low-stock threshold in grams; only meaningful on a bulk pool. */
+  reorder_level: string;
   is_active: 0 | 1;
   purity_code: string | null;
   category_name: string | null;
@@ -63,6 +65,12 @@ export interface StockItem {
 
 export interface StockItemListResponse {
   items: StockItem[];
+  pagination?: {
+    page: number;
+    per_page: number;
+    total: number;
+    total_pages: number;
+  };
   purities: Purity[];
   categories: StockCategory[];
 }
@@ -134,6 +142,8 @@ export interface SaveItemPayload {
   huid?: string | null;
   hsn_code?: string | null;
   barcode?: string | null;
+  /** Bulk pools only: warn on the dashboard once stock falls to this weight. */
+  reorder_level?: number;
 }
 
 export interface AdjustPayload {

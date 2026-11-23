@@ -20,6 +20,15 @@ const EDITABLE_SETTINGS = [
     'company_name', 'company_address', 'company_phone', 'company_email',
     'company_gstin', 'company_logo_path', 'default_tax_rate',
     'invoice_terms', 'invoice_footer_note', 'currency',
+    // days a bill may stay unpaid before the dashboard calls it overdue
+    'invoice_credit_days',
+    // daily metal rate feed (api/cron/fetch_rates.php). The CBIC keys hold the
+    // government customs tariff value, typed in each fortnight because CBIC
+    // publishes no machine-readable feed — see src/Jewellery/RateFeed/CbicSource.
+    'rate_feed_enabled', 'rate_feed_sources', 'rate_feed_max_move_pct',
+    'rate_feed_cbic_gold_usd_10g', 'rate_feed_cbic_silver_usd_kg',
+    'rate_feed_cbic_notification', 'rate_feed_cbic_effective_from',
+    'rate_feed_usd_inr',
 ];
 
 /** Max characters for a stored image value (base64 data URI ~1.33x the file). ~8MB of base64 ≈ 6MB image. */

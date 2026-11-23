@@ -1,31 +1,31 @@
-import type { Invoice, InvoicePayment } from "@/features/invoices/types";
+import type { CompanySettings } from "@/features/billing/api";
+import type { PaymentRow } from "@/features/invoices/types";
 import { amountInWords, escapeHtml, fmtDate, inr, openPrintWindow, PAYMENT_MODE_LABELS } from "./print";
 
 /**
  * "Money Received" slip for a single payment — half an A4 page, printed from a
  * hidden iframe like the invoice itself (style.md §6 / planning/09 §5).
+ *
+ * `bill` is null for an on-account receipt (an advance with no bill behind it).
  */
 export function printPaymentReceipt({
   payment,
-  invoice,
+  bill,
   company,
 }: {
-  payment: InvoicePayment;
-  invoice: Invoice;
-  company: Record<string, string>;
+  payment: PaymentRow;
+  bill: { grand_total: string | number; paid_amount: string | number; customer_mobile: string | null } | null;
+  company: CompanySettings;
 }): void {
   const companyName = escapeHtml(company.company_name || "Mahalakshmi Jewellers");
   const logoHtml = company.company_logo_path
     ? `<img class="logo" src="${escapeHtml(company.company_logo_path)}" alt="${companyName}" />`
     : "";
 
-  const balance = Number(invoice.grand_total) - Number(invoice.paid_amount);
   const chequeBits =
     payment.payment_mode === "cheque"
       ? [
-          payment.cheque_number ? `Cheque #${payment.cheque_number}` : "",
-          payment.cheque_bank ? escapeHtml(payment.cheque_bank) : "",
-          payment.cheque_date ? fmtDate(payment.cheque_date) : "",
+          payment.cheque_number ? `Cheque #${escapeHtml(payment.cheque_number)}` : "",
           payment.cheque_status ? `Status: ${payment.cheque_status}` : "",
         ]
           .filter(Boolean)
@@ -77,7 +77,7 @@ export function printPaymentReceipt({
           ${logoHtml || `<div class="co-name">${companyName}</div>`}
           <div class="co-meta">
             ${company.company_address ? `${escapeHtml(company.company_address)}<br>` : ""}
-            ${[company.company_phone, company.company_email].filter(Boolean).map(escapeHtml).join(" &nbsp;·&nbsp; ")}
+            ${[company.company_phone, company.company_email].filter((s): s is string => Boolean(s)).map(escapeHtml).join(" &nbsp;·&nbsp; ")}
             ${company.company_gstin ? `${company.company_phone || company.company_email ? "<br>" : ""}GSTIN: ${escapeHtml(company.company_gstin)}` : ""}
           </div>
         </div>
@@ -89,13 +89,13 @@ export function printPaymentReceipt({
       <div class="meta-row">
         <div class="party">
           <div class="label">Received from</div>
-          <div class="name">${escapeHtml(invoice.customer_name ?? "")}</div>
-          ${invoice.customer_mobile ? `<div class="ln">${escapeHtml(invoice.customer_mobile)}</div>` : ""}
+          <div class="name">${escapeHtml(payment.customer_name ?? "")}</div>
+          ${bill?.customer_mobile ? `<div class="ln">${escapeHtml(bill.customer_mobile)}</div>` : ""}
         </div>
         <div>
           <div class="kv"><span class="k">Receipt No.</span><span class="v no">${escapeHtml(payment.receipt_no)}</span></div>
           <div class="kv"><span class="k">Date</span><span class="v">${fmtDate(payment.payment_date)}</span></div>
-          <div class="kv"><span class="k">Against bill</span><span class="v no">${escapeHtml(invoice.invoice_no)}</span></div>
+          <div class="kv"><span class="k">Against bill</span><span class="v no">${payment.invoice_no ? escapeHtml(payment.invoice_no) : "On account"}</span></div>
           <div class="kv"><span class="k">Mode</span><span class="v">${PAYMENT_MODE_LABELS[payment.payment_mode] ?? escapeHtml(payment.payment_mode)}</span></div>
           ${payment.bank_name ? `<div class="kv"><span class="k">Bank</span><span class="v">${escapeHtml(payment.bank_name)}</span></div>` : ""}
         </div>
@@ -108,11 +108,15 @@ export function printPaymentReceipt({
 
       <div class="words"><span class="k">Amount in words</span>${escapeHtml(amountInWords(Number(payment.amount)))}</div>
 
-      <div class="info">
-        <b>Bill total:</b> ${inr(invoice.grand_total)} &nbsp;&nbsp;·&nbsp;&nbsp;
-        <b>Received so far:</b> ${inr(invoice.paid_amount)} &nbsp;&nbsp;·&nbsp;&nbsp;
-        <b>Balance due:</b> ${inr(balance)}
-      </div>
+      ${
+        bill
+          ? `<div class="info">
+        <b>Bill total:</b> ${inr(bill.grand_total)} &nbsp;&nbsp;·&nbsp;&nbsp;
+        <b>Received so far:</b> ${inr(bill.paid_amount)} &nbsp;&nbsp;·&nbsp;&nbsp;
+        <b>Balance due:</b> ${inr(Number(bill.grand_total) - Number(bill.paid_amount))}
+      </div>`
+          : ""
+      }
       ${chequeBits ? `<div class="info">${chequeBits}</div>` : ""}
       ${payment.notes ? `<div class="info"><b>Note:</b> ${escapeHtml(payment.notes)}</div>` : ""}
       ${

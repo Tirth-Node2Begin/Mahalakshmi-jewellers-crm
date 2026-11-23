@@ -1,12 +1,21 @@
 "use client";
 
+import { getCompanyLogo, getCompanyName, useCompanySettings } from "@/features/settings/company-settings";
 import { useNav } from "@/lib/nav";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/shared/utils/cn";
+import { initials } from "@/shared/utils/format";
 import { LogOut } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { FALLBACK_ICON, NAV_ICONS } from "./icon-map";
+
+function splitBrandName(name: string): string[] {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= 2) return words.length ? words : [name];
+  const midpoint = Math.ceil(words.length / 2);
+  return [words.slice(0, midpoint).join(" "), words.slice(midpoint).join(" ")];
+}
 
 /**
  * Floating purple icon rail (style.md §7): 88px wide, 32px radius, circular
@@ -16,6 +25,7 @@ export function Sidebar() {
   const { navigation } = useNav();
   const { logout } = useAuth();
   const pathname = usePathname();
+  const { data: companyData } = useCompanySettings();
 
   const items = navigation.flatMap((section) => section.items);
   const isActive = (href: string) =>
@@ -24,6 +34,9 @@ export function Sidebar() {
   const activeHref = items
     .filter((item) => isActive(item.href))
     .sort((a, b) => b.href.length - a.href.length)[0]?.href;
+  const companyName = getCompanyName(companyData?.settings);
+  const companyLogo = getCompanyLogo(companyData?.settings);
+  const brandLines = splitBrandName(companyName);
 
   return (
     <>
@@ -34,16 +47,28 @@ export function Sidebar() {
         className="group fixed left-6 top-6 bottom-6 z-40 hidden w-[84px] flex-col overflow-hidden rounded-rail bg-[linear-gradient(180deg,var(--grad-brand-from)_0%,var(--grad-brand-to)_100%)] px-3 py-5 shadow-card transition-[width,box-shadow] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] hover:w-[252px] hover:shadow-raised md:flex"
         aria-label="Primary navigation"
       >
-        <Link href="/" className="relative mb-3 flex h-12 w-full shrink-0 items-center" aria-label="Mahalakshmi Jewellers home">
+        <Link href="/" className="relative mb-3 flex h-12 w-full shrink-0 items-center" aria-label={`${companyName} home`}>
           <span className="flex w-[60px] shrink-0 items-center justify-center">
-            <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white/15 text-lg font-extrabold text-white">
-              M
+            <span
+              className={cn(
+                "flex h-11 w-11 items-center justify-center overflow-hidden rounded-full text-lg font-extrabold shadow-card",
+                companyLogo ? "bg-white" : "bg-white/15 text-white",
+              )}
+            >
+              {companyLogo ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={companyLogo} alt="" className="h-full w-full object-contain p-1.5" />
+              ) : (
+                initials(companyName)
+              )}
             </span>
           </span>
-          {/* Two lines: the full name does not fit on one at the 252px expanded width. */}
-          <span className="pointer-events-none absolute left-[60px] flex w-[168px] flex-col text-[15px] font-extrabold leading-[18px] tracking-tight text-white opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-hover:delay-100">
-            <span>Mahalakshmi</span>
-            <span>Jewellers</span>
+          <span className="pointer-events-none absolute left-[60px] flex w-[168px] flex-col text-[15px] font-extrabold leading-[18px] text-white opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-hover:delay-100">
+            {brandLines.map((line, index) => (
+              <span key={`${line}-${index}`} className="truncate">
+                {line}
+              </span>
+            ))}
           </span>
         </Link>
 

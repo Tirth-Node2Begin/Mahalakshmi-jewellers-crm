@@ -9,12 +9,19 @@ namespace CRM\Jewellery;
  *
  *   metal value = net weight × rate per gram          (the rate is already purity-specific)
  *   making      = per gram | fixed | percent of metal value
- *   taxable     = metal + making − discount
+ *   taxable     = metal + making − discount        (discount capped at metal + making)
  *
  * Tax-exclusive: GST is added on top of the taxable amount.
  * Tax-inclusive: the quoted figure already contains GST, so it is stripped out
  *                (tax = amount × rate ÷ (100 + rate)). The customer's agreed
- *                number stands and the shop's income drops accordingly.
+ *                number stands and the shop's income drops accordingly. Metal,
+ *                making AND discount are all scaled by the same factor, so the
+ *                returned components always satisfy
+ *                metal + making − discount + tax = line total.
+ *
+ * The returned `discount` is the EFFECTIVE discount for this line and the
+ * caller MUST subtract it from the document total — see InvoiceDraft::save()
+ * and BillingService::totalsFromLines().
  */
 final class Pricing
 {
@@ -43,10 +50,9 @@ final class Pricing
             $qty
         ), 2);
 
+        // a line cannot be discounted below nothing
+        $discount = min($discount, round($metalValue + $making, 2));
         $taxable = round($metalValue + $making - $discount, 2);
-        if ($taxable < 0) {
-            $taxable = 0.0;
-        }
 
         // only 'taxable' lines carry output GST; the rest are still full sales
         $effectiveRate = $treatment === 'taxable' ? $taxRate : 0.0;
@@ -56,10 +62,24 @@ final class Pricing
             $tax = round($taxable * $effectiveRate / (100 + $effectiveRate), 2);
             $net = round($taxable - $tax, 2);
             $lineTotal = $taxable;
-            // metal/making are shown net of the tax they carried
+            // Every component is shown net of the tax it carried, scaled by the
+            // SAME factor. Deriving making as (net − metal) instead would drive
+            // it negative whenever the discount outweighed it, which in turn
+            // unbalanced the sale voucher and blocked the bill at the counter.
             $scale = $taxable > 0 ? $net / $taxable : 1.0;
             $metalValue = round($metalValue * $scale, 2);
-            $making = round($net - $metalValue, 2);
+            $making = round($making * $scale, 2);
+            $discount = round($discount * $scale, 2);
+            // the rounding remainder rides on the larger component, so scaling
+            // can never push a component below zero
+            $drift = round($net - ($metalValue + $making - $discount), 2);
+            if (abs($drift) > 0.001) {
+                if ($metalValue >= $making) {
+                    $metalValue = round($metalValue + $drift, 2);
+                } else {
+                    $making = round($making + $drift, 2);
+                }
+            }
         } else {
             $tax = round($taxable * $effectiveRate / 100, 2);
             $lineTotal = round($taxable + $tax, 2);
@@ -73,6 +93,8 @@ final class Pricing
             'rate_per_gram' => round($ratePerGram, 2),
             'metal_value' => $metalValue,
             'making_charge' => $making,
+            // the EFFECTIVE discount: in inclusive mode it is net of the tax it
+            // carried, so metal + making − discount + tax always equals the total
             'discount' => round($discount, 2),
             'taxable_value' => round($metalValue + $making - $discount, 2),
             'tax_rate' => $taxRate,

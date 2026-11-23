@@ -21,7 +21,7 @@ export const invoicesApi = {
   reopen: (id: number) => api.post("invoices.php", { action: "reopen", id }),
   cancel: (id: number) => api.post("invoices.php", { action: "cancel", id }),
   remove: (id: number) => api.post("invoices.php", { action: "delete", id }),
-  addPayment: (payload: Record<string, unknown>) => api.post("invoices.php", { action: "add_payment", ...payload }),
+  addPayment: (payload: Record<string, unknown>) => api.post("payments.php", { action: "receive", ...payload }),
   deletePayment: (payment_id: number) => api.post("invoices.php", { action: "delete_payment", payment_id }),
   updateCheque: (payment_id: number, cheque_status: string, deposit_bank_account_id?: number) =>
     api.post("invoices.php", { action: "update_cheque_status", payment_id, cheque_status, deposit_bank_account_id }),
@@ -30,6 +30,12 @@ export const invoicesApi = {
 export const paymentsApi = {
   list: (params: Record<string, string | undefined>) => api.get<PaymentListResponse>("payments.php", params),
   helpers: () => api.get<PaymentHelpers>("payments.php", { helpers: 1 }),
+  /** the cheque reached the bank — moves it out of Cheques in Hand */
+  clearCheque: (payload: { id: number; bank_account_id?: number | null; cleared_on?: string }) =>
+    api.post("payments.php", { action: "clear_cheque", ...payload }),
+  /** the cheque came back — the receipt is cancelled and the bill is due again */
+  bounceCheque: (payload: { id: number; reason: string }) =>
+    api.post("payments.php", { action: "bounce_cheque", ...payload }),
 };
 
 export function paymentModeLabel(mode: string): string {

@@ -17,6 +17,10 @@ export interface CoaLedger {
   is_active: 0 | 1;
   opening_balance: string;
   opening_type: DrCr;
+  /** live balance as on `balance_as_on`, derived from the vouchers every time */
+  balance: number;
+  balance_type: DrCr;
+  balance_as_on: string;
 }
 
 /** A group node. `children` is only populated on root groups (max depth 2). */
@@ -101,7 +105,9 @@ export const NATURE_LABEL: Record<Nature, string> = {
 };
 
 export const accountingApi = {
-  coa: () => api.get<CoaResponse>("accounting.php", { view: "coa" }),
+  /** `asOn` moves the balance shown against every ledger (default: today). */
+  coa: (asOn?: string) =>
+    api.get<CoaResponse>("accounting.php", { view: "coa", ...(asOn ? { as_on: asOn } : {}) }),
   ledger: (ledgerId: number, from: string, to: string) =>
     api.get<{ statement: LedgerStatement }>("accounting.php", { view: "ledger", ledger_id: ledgerId, from, to }),
   createJournal: (payload: { vdate: string; narration: string; entries: JournalLine[] }) =>

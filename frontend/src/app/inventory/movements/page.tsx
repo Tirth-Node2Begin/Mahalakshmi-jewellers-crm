@@ -30,8 +30,8 @@ export default function StockMovementsPage() {
 
   // the item picker is fed by the item master, searched as you type
   const { data: itemData } = useQuery({
-    queryKey: ["stock", "items", { picker: true }],
-    queryFn: () => stockApi.items({}),
+    queryKey: ["stock", "items", { picker: true, per_page: 300 }],
+    queryFn: () => stockApi.items({ per_page: 300 }),
     enabled: allowed,
   });
 

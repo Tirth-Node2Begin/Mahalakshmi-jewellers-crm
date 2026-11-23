@@ -8,36 +8,73 @@ use CRM\Core\Request;
 use CRM\Core\Response;
 use CRM\Database\Database;
 use CRM\Support\Audit;
+use CRM\Support\GstVisibility;
 use CRM\Validation\Validator;
 
 $user = requireApiAuth();
 requirePermission('rbac.manage');
+$canManageNonGstAccess = GstVisibility::canManageNonGstAccess($user);
+
+function isNonGstRole(array $role): bool
+{
+    return (string) ($role['name'] ?? '') === 'non_gst_billing';
+}
+
+function isNonGstPermission(array $permission): bool
+{
+    return (string) ($permission['resource'] ?? '') === 'invoices'
+        && (string) ($permission['action'] ?? '') === 'non_gst';
+}
 
 if (Request::method() === 'GET') {
     $module = (string) ($_GET['module'] ?? 'roles');
 
     switch ($module) {
         case 'roles':
+            $roleVisibilitySql = $canManageNonGstAccess ? '' : " WHERE r.name <> 'non_gst_billing'";
+            $grantCountSql = $canManageNonGstAccess
+                ? 'COUNT(DISTINCT g.permission_id)'
+                : "COUNT(DISTINCT CASE
+                    WHEN NOT (gp.resource = 'invoices' AND gp.action = 'non_gst') THEN g.permission_id
+                  END)";
             $roles = Database::fetchAll(
-                'SELECT r.*, COUNT(DISTINCT ura.user_id) AS user_count,
-                        COUNT(DISTINCT g.permission_id) AS grant_count
+                "SELECT r.*, COUNT(DISTINCT ura.user_id) AS user_count,
+                        {$grantCountSql} AS grant_count
                  FROM roles r
                  LEFT JOIN user_role_assignments ura ON ura.role_id = r.id AND ura.is_active = 1
                  LEFT JOIN role_permission_grants g ON g.role_id = r.id
-                 GROUP BY r.id ORDER BY r.id'
+                 LEFT JOIN permissions gp ON gp.id = g.permission_id
+                 {$roleVisibilitySql}
+                 GROUP BY r.id ORDER BY r.id"
             );
             Response::success(['roles' => $roles]);
 
         case 'permissions':
+            $permissionVisibilitySql = $canManageNonGstAccess
+                ? ''
+                : " AND NOT (resource = 'invoices' AND action = 'non_gst')";
             $permissions = Database::fetchAll(
-                'SELECT id, resource, action, description FROM permissions WHERE is_active = 1 ORDER BY resource, action'
+                "SELECT id, resource, action, description
+                   FROM permissions
+                  WHERE is_active = 1{$permissionVisibilitySql}
+                  ORDER BY resource, action"
             );
             Response::success(['permissions' => $permissions]);
 
         case 'role_grants':
             $roleId = (int) ($_GET['role_id'] ?? 0);
+            $role = Database::fetchOne('SELECT * FROM roles WHERE id = :id', ['id' => $roleId]);
+            if ($role === null || (!$canManageNonGstAccess && isNonGstRole($role))) {
+                Response::error('NOT_FOUND', 'Role not found.', 404);
+            }
+            $grantVisibilitySql = $canManageNonGstAccess
+                ? ''
+                : " AND NOT (p.resource = 'invoices' AND p.action = 'non_gst')";
             $grants = Database::fetchAll(
-                'SELECT permission_id FROM role_permission_grants WHERE role_id = :r',
+                "SELECT g.permission_id
+                   FROM role_permission_grants g
+                   JOIN permissions p ON p.id = g.permission_id
+                  WHERE g.role_id = :r{$grantVisibilitySql}",
                 ['r' => $roleId]
             );
             Response::success(['permission_ids' => array_map('intval', array_column($grants, 'permission_id'))]);
@@ -70,6 +107,9 @@ switch ($action) {
             if ($role === null) {
                 Response::error('NOT_FOUND', 'Role not found.', 404);
             }
+            if (!$canManageNonGstAccess && isNonGstRole($role)) {
+                Response::error('NOT_FOUND', 'Role not found.', 404);
+            }
             if ((int) $role['is_system'] === 1) {
                 Response::error('FORBIDDEN', 'System roles cannot be edited.', 403);
             }
@@ -83,6 +123,9 @@ switch ($action) {
 
         if (Database::fetchValue('SELECT id FROM roles WHERE name = :n', ['n' => $slug]) !== null) {
             Response::error('CONFLICT', 'A role with that name already exists.', 409);
+        }
+        if (!$canManageNonGstAccess && $slug === 'non_gst_billing') {
+            Response::error('FORBIDDEN', 'Only Admin can manage Non GST billing access.', 403);
         }
         $newId = Database::insert('roles', [
             'name' => $slug,
@@ -98,6 +141,9 @@ switch ($action) {
         $data = Validator::validate($body, ['id' => 'required|int|min:1']);
         $role = Database::fetchOne('SELECT * FROM roles WHERE id = :id', ['id' => $data['id']]);
         if ($role === null) {
+            Response::error('NOT_FOUND', 'Role not found.', 404);
+        }
+        if (!$canManageNonGstAccess && isNonGstRole($role)) {
             Response::error('NOT_FOUND', 'Role not found.', 404);
         }
         if ((int) $role['is_system'] === 1) {
@@ -124,12 +170,38 @@ switch ($action) {
         if ($role === null) {
             Response::error('NOT_FOUND', 'Role not found.', 404);
         }
+        if (!$canManageNonGstAccess && isNonGstRole($role)) {
+            Response::error('NOT_FOUND', 'Role not found.', 404);
+        }
         if ((int) $role['is_system'] === 1) {
             Response::error('FORBIDDEN', 'System role grants are fixed.', 403);
         }
-        Database::transaction(static function () use ($data, $body): void {
-            Database::execute('DELETE FROM role_permission_grants WHERE role_id = :r', ['r' => $data['role_id']]);
-            foreach (array_unique(array_map('intval', (array) $body['permission_ids'])) as $pid) {
+        $permissionIds = array_unique(array_map('intval', (array) $body['permission_ids']));
+        foreach ($permissionIds as $pid) {
+            $permission = Database::fetchOne(
+                'SELECT id, resource, action FROM permissions WHERE id = :p AND is_active = 1',
+                ['p' => $pid]
+            );
+            if ($permission === null) {
+                throw new RuntimeException('Unknown permission in grant list.');
+            }
+            if (!$canManageNonGstAccess && isNonGstPermission($permission)) {
+                Response::error('FORBIDDEN', 'Only Admin can manage Non GST billing access.', 403);
+            }
+        }
+        Database::transaction(static function () use ($data, $permissionIds, $canManageNonGstAccess): void {
+            if ($canManageNonGstAccess) {
+                Database::execute('DELETE FROM role_permission_grants WHERE role_id = :r', ['r' => $data['role_id']]);
+            } else {
+                Database::execute(
+                    "DELETE g FROM role_permission_grants g
+                      JOIN permissions p ON p.id = g.permission_id
+                     WHERE g.role_id = :r
+                       AND NOT (p.resource = 'invoices' AND p.action = 'non_gst')",
+                    ['r' => $data['role_id']]
+                );
+            }
+            foreach ($permissionIds as $pid) {
                 if (Database::fetchValue('SELECT id FROM permissions WHERE id = :p AND is_active = 1', ['p' => $pid]) === null) {
                     throw new RuntimeException('Unknown permission in grant list.');
                 }
@@ -156,6 +228,9 @@ switch ($action) {
         $action = strtolower(preg_replace('/[^a-z0-9_]+/', '', strtolower($data['perm_action'])) ?? '');
         if ($resource === '' || $action === '') {
             Response::error('VALIDATION_ERROR', 'Validation failed.', 422, ['resource' => 'Invalid resource or action.']);
+        }
+        if (!$canManageNonGstAccess && $resource === 'invoices' && $action === 'non_gst') {
+            Response::error('FORBIDDEN', 'Only Admin can manage Non GST billing access.', 403);
         }
         Database::execute(
             'INSERT INTO permissions (resource, action, description) VALUES (:r, :a, :d)

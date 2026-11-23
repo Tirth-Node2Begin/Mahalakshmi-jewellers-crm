@@ -12,6 +12,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { localDateString } from "@/shared/utils/format";
 import { toast } from "sonner";
+import { invalidateMoneyQueries } from "@/shared/api/invalidate-money";
 
 export function RecordPaymentModal({
   invoiceId,
@@ -51,13 +52,16 @@ export function RecordPaymentModal({
         payment_date: date,
         payment_mode: mode,
         bank_account_id: bank ? Number(bank) : null,
-        cheque_number: mode === "cheque" ? chequeNumber || null : null,
-        cheque_date: mode === "cheque" ? chequeDate || null : null,
-        cheque_bank: mode === "cheque" ? chequeBank || null : null,
-        notes: notes || null,
+        // the receipt keeps one reference + a note, so the cheque details ride on those
+        ref_no: mode === "cheque" ? chequeNumber || null : null,
+        notes:
+          [mode === "cheque" && chequeDate ? `Cheque dated ${chequeDate}` : "", mode === "cheque" ? chequeBank : "", notes]
+            .filter(Boolean)
+            .join(" · ") || null,
       });
       toast.success("Payment recorded.");
       void queryClient.invalidateQueries({ queryKey: ["invoices"] });
+      invalidateMoneyQueries(queryClient);
       setAmount("");
       setChequeNumber("");
       setChequeDate("");

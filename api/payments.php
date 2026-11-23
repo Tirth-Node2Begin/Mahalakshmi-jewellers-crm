@@ -161,6 +161,48 @@ switch ($action) {
 
         Response::success(['id' => $paymentId, 'message' => 'Payment received.'], 201);
 
+    case 'clear_cheque':
+        // the cheque reached the bank: Dr that bank account, Cr Cheques in Hand
+        requirePermission('payments.create');
+        $data = Validator::validate($body, [
+            'id' => 'required|int|min:1',
+            'bank_account_id' => 'nullable|int|min:1',
+            'cleared_on' => 'nullable|date',
+        ]);
+        $paymentId = (int) $data['id'];
+        if ($gstVisibleOnly && Database::fetchValue(
+            'SELECT 1 FROM invoice_payments p WHERE p.id = :id AND ' . GstVisibility::paymentVisibleSql('p') . ' LIMIT 1',
+            ['id' => $paymentId]
+        ) === null) {
+            Response::error('NOT_FOUND', 'Payment not found.', 404);
+        }
+        PaymentService::clearCheque(
+            paymentId: $paymentId,
+            bankAccountId: $data['bank_account_id'] !== null ? (int) $data['bank_account_id'] : null,
+            date: (string) ($data['cleared_on'] ?? date('Y-m-d')),
+            userId: $user->id
+        );
+        Response::success(['message' => 'Cheque marked cleared.']);
+
+    case 'bounce_cheque':
+        // the cheque came back: the receipt is cancelled and the bill is due again
+        requirePermission('payments.cancel');
+        $paymentId = (int) ($body['id'] ?? 0);
+        if ($gstVisibleOnly && Database::fetchValue(
+            'SELECT 1 FROM invoice_payments p WHERE p.id = :id AND ' . GstVisibility::paymentVisibleSql('p') . ' LIMIT 1',
+            ['id' => $paymentId]
+        ) === null) {
+            Response::error('NOT_FOUND', 'Payment not found.', 404);
+        }
+        $reason = trim((string) ($body['reason'] ?? ''));
+        if ($reason === '') {
+            Response::error('VALIDATION_ERROR', 'Please say what the bank said.', 422, [
+                'reason' => 'A reason is required.',
+            ]);
+        }
+        PaymentService::bounceCheque($paymentId, $reason, $user->id);
+        Response::success(['message' => 'Cheque marked bounced — the bill is due again.']);
+
     case 'cancel':
         requirePermission('payments.cancel');
         $paymentId = (int) ($body['id'] ?? 0);

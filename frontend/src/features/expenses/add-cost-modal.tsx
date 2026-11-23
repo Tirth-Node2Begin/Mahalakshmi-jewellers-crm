@@ -9,6 +9,7 @@ import { Select } from "@/shared/ui/select";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { invalidateMoneyQueries } from "@/shared/api/invalidate-money";
 
 const NEW_CATEGORY = "__new__";
 
@@ -63,11 +64,13 @@ export function AddCostModal({
         setCategoryId(String(catId));
         void queryClient.invalidateQueries({ queryKey: ["expenses"] });
         void queryClient.invalidateQueries({ queryKey: ["expense-categories"] });
+        invalidateMoneyQueries(queryClient);
       }
       await expensesApi.addItem({ category_id: catId, name: name.trim(), amount: amount ? Number(amount) : 0 });
       toast.success("Fixed cost added.");
       void queryClient.invalidateQueries({ queryKey: ["expenses"] });
       void queryClient.invalidateQueries({ queryKey: ["expense-categories"] });
+      invalidateMoneyQueries(queryClient);
       onClose();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not add the cost.");

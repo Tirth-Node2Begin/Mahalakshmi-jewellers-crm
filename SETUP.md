@@ -36,6 +36,30 @@ mysql -u root -p jewellers_crm < database/migrations/2026_07_30_metals_master.sq
 # custom vendor types — the shop can add its own supplier/maker types from the
 # app (Vendors → Add supplier / maker → Type → "+ Add a new type…").
 mysql -u root -p jewellers_crm < database/migrations/2026_08_01_vendor_types.sql
+
+# a custom vendor type now belongs to a partner page (Suppliers / Makers /
+# Services), so each page can grow its own type list.
+mysql -u root -p jewellers_crm < database/migrations/2026_08_02_vendor_type_category.sql
+
+# daily gold/silver/platinum rate fetch — adds rate_feed_runs, rate_feed_quotes
+# and the rates.feed permission. Run seed.php afterwards.
+mysql -u root -p jewellers_crm < database/migrations/2026_08_04_rate_feed.sql
+
+# billing/receipt accounting corrections: adds invoices.bill_discount and
+# estimates.bill_discount (per-line discounts now reach the bill total, and
+# discount_total becomes the TOTAL discount), plus the Cheques in Hand ledger
+# so a received cheque is not treated as banked before it clears.
+mysql -u root -p jewellers_crm < database/migrations/2026_11_23_billing_accounting_fixes.sql
+```
+
+After that migration, check for tagged pieces corrupted by the old stock-adjustment
+behaviour (a tagged piece could be told it held several pieces, which parked phantom
+value on the Inventory ledger). It prints a plan and changes nothing until `--apply`:
+
+```bash
+php cli/repair-tagged-stock.php            # dry run — review the plan
+php cli/repair-tagged-stock.php --apply    # write the corrections
+php cli/verify-ledger.php                  # all 10 checks should pass
 ```
 
 `schema.sql` is the inherited base schema. The migration then drops the modules this product does not use (leads, HR, integrations, website, orders, repairs) and adds the jewellery + accounting tables: `purities`, `metal_rates`, `account_groups`, `ledger_accounts`, `vouchers`, `voucher_entries`, `estimates`, `estimate_items`, `invoice_old_metal`, `vendor_payments`, plus the weight/purity/HUID columns on items and the GST/old-metal columns on bills.
@@ -101,6 +125,9 @@ real services, so the books stay true. Skip this on a real installation.
 
 ## 5. Run
 
+On Windows, double-click `start.bat` in the project root — it starts both
+servers as two tabs in one Windows Terminal window and opens the app. By hand:
+
 ```bash
 # backend (from the project root)
 php -S localhost:8000
@@ -132,13 +159,50 @@ php cli/verify-ledger.php
 # concurrent billing safety (USE A TEST DATABASE — it writes real rows)
 php cli/stress-billing.php 20 30      # 20 parallel counters, 30 items
 php cli/stress-billing.php --cleanup
+
+# daily rate feed — dry run, writes nothing
+php cli/check-rate-feed.php
 ```
 
 `verify-ledger.php` exits non-zero if anything drifted. `stress-billing.php` deliberately makes some counters fight over the same piece and asserts that invoice numbers stay unique and gap-free, no piece is sold twice, the losers get a clean conflict rather than a crash, and the trial balance still nets to zero.
 
-Run both before every release.
+Run both before every release. `check-rate-feed.php` is the one to run when the Rates page says the feed came back empty — it shows whether the source simply has not published yet, or whether the page changed and the parser needs updating.
 
-## 8. Backups
+## 8. Daily rate feed
+
+Gold, silver and platinum rates are fetched each morning and **staged for approval** — they are never written straight into `metal_rates`. A finalised bill stamps the rate it used, so an unattended wrong rate could not be corrected afterwards; someone with `rates.set` presses **Apply** on the Rates page.
+
+```bash
+# schedule it before the shop opens; twice is fine (IBJA publishes AM and PM)
+15 9  * * *  php /path/to/api/cron/fetch_rates.php
+30 15 * * *  php /path/to/api/cron/fetch_rates.php
+```
+
+On a hosting panel with no CLI cron, call it over HTTP with the `CRON_KEY`:
+
+```
+curl -s "https://your-host/api/cron/fetch_rates.php?key=<CRON_KEY>"
+```
+
+**Where the numbers come from.** No Government of India site publishes a daily retail metal rate — the only government figure is CBIC's *fortnightly customs tariff value* for gold and silver (USD, an import valuation, no platinum). So the rate itself comes from **IBJA** (`ibjarates.com`), the national trade benchmark that Income-Tax gold valuation and the RBI's Sovereign Gold Bond price are both derived from. IBJA publishes gold 999/995/916/750/585, silver 999 and platinum 999; purities it does not publish (sterling 925, platinum 950) are worked out pro-rata and labelled as such on the review card.
+
+**Safety checks.** Every staged rate is checked for a day-over-day jump beyond `rate_feed_max_move_pct` (default 8%), a purity priced above a purer one, an implausible per-gram figure (which is what a units change at the source looks like), a gold:silver ratio outside 15–150, and a source that has republished nothing since the last run. Anything that fails hard is held out of **Apply all** and has to be ticked individually.
+
+**Optional government cross-check.** Paste the latest CBIC tariff values into Settings and the check switches itself on:
+
+| setting | example |
+|---|---|
+| `rate_feed_cbic_gold_usd_10g` | `1456` |
+| `rate_feed_cbic_silver_usd_kg` | `2603` |
+| `rate_feed_cbic_notification` | `37/2026-Customs (N.T.)` |
+| `rate_feed_cbic_effective_from` | `2026-04-15` |
+| `rate_feed_usd_inr` | `87.20` |
+
+It is manual because CBIC has no machine-readable feed: their notification site is a JavaScript app whose API needs a session, and the old plain-HTML index now 404s. Leave the fields blank and the cross-check simply reports itself unavailable — the day-over-day guard always runs regardless.
+
+Set `rate_feed_enabled` to `0` to turn the whole thing off and go back to typing rates in by hand.
+
+## 9. Backups
 
 Schedule `mysqldump` at least nightly:
 
@@ -146,7 +210,7 @@ Schedule `mysqldump` at least nightly:
 mysqldump -u root -p jewellers_crm | gzip > backup-$(date +%F).sql.gz
 ```
 
-## 9. Where things are
+## 10. Where things are
 
 | what | where |
 |---|---|

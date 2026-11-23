@@ -1,11 +1,12 @@
 "use client";
 
 import { useAuth } from "@/lib/auth";
+import { useNav } from "@/lib/nav";
 import { api } from "@/shared/api/http-client";
 import { Avatar } from "@/shared/ui/avatar";
 import { cn } from "@/shared/utils/cn";
 import { useQuery } from "@tanstack/react-query";
-import { Bell, ChevronDown, LogOut, Moon, Sun, UserRound } from "lucide-react";
+import { Bell, ChevronDown, ChevronRight, LogOut, Moon, Sun, UserRound } from "lucide-react";
 import { useTheme } from "next-themes";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -23,6 +24,7 @@ import { usePageHeaderOverride } from "./page-header";
 const PAGE_TITLES: Array<[RegExp, string, string?]> = [
   [/^\/$/, "Dashboard"],
   [/^\/rates/, "Today's Rates", "Rate per gram used for new bills."],
+  [/^\/leads/, "Leads", "Sales enquiries before they become customers."],
   [/^\/customers\/detail/, "Customer"],
   [/^\/customers/, "Customers"],
   [/^\/estimates\/create/, "New Estimate", "Nothing is sold and no stock moves until this becomes a bill."],
@@ -38,8 +40,10 @@ const PAGE_TITLES: Array<[RegExp, string, string?]> = [
   [/^\/accounting\/ledger/, "Ledger"],
   [/^\/accounting/, "Accounts", "Chart of accounts and ledger statements."],
   [/^\/vendors\/payments/, "Vendor Payments"],
-  [/^\/vendors\/detail/, "Supplier"],
-  [/^\/vendors/, "Suppliers & Makers"],
+  [/^\/vendors\/detail/, "Supplier / Maker"],
+  [/^\/vendors\/makers/, "Jewellery Makers", "The karigars and workshops who make and repair your jewellery."],
+  [/^\/vendors\/services/, "Services & Others", "Hallmark centres, couriers, designers and other people you work with."],
+  [/^\/vendors/, "Material Suppliers", "The people you buy gold, diamonds, stones and packing material from."],
   [/^\/expenses\/insights/, "Expense Insights"],
   [/^\/expenses\/monthly/, "Fixed Costs"],
   [/^\/expenses\/categories/, "Expense Categories"],
@@ -53,6 +57,8 @@ const PAGE_TITLES: Array<[RegExp, string, string?]> = [
     "Use this only when the shelf and the computer disagree — every correction is signed with your name and reason.",
   ],
   [/^\/inventory/, "Stock in Hand", "Everything on the shelf right now, metal by metal."],
+  [/^\/hr\/employees/, "Employees", "Staff directory, salary and bank details."],
+  [/^\/hr\/payroll/, "Payroll", "Create salary runs and post payments into expenses."],
   [/^\/reports\/pnl/, "Profit & Loss"],
   [/^\/reports/, "Reports"],
   [/^\/notifications/, "Notifications"],
@@ -64,6 +70,38 @@ const PAGE_TITLES: Array<[RegExp, string, string?]> = [
   [/^\/settings\/bank-accounts/, "Bank Accounts"],
   [/^\/settings/, "Settings"],
 ];
+
+/**
+ * The muted caption above the page heading (style.md §8): which part of the app
+ * this screen belongs to, and — on a sub-page — a link back to the list it was
+ * opened from. Derived from the nav the user actually has, so it can never point
+ * somewhere they are not allowed.
+ *
+ * Returns null on the dashboard and on screens outside the menu (profile,
+ * notifications), where a trail would say nothing the title does not.
+ */
+function useBreadcrumb(pathname: string): { section: string; parent?: { label: string; href: string } } | null {
+  const { navigation } = useNav();
+  if (pathname === "/") return null;
+
+  const covers = (href: string) => pathname === href || pathname.startsWith(`${href}/`);
+  let best: { section: string; label: string; href: string } | null = null;
+  for (const section of navigation) {
+    for (const item of section.items) {
+      // "/" would cover everything — it is the dashboard, handled above
+      if (item.href === "/" || !covers(item.href)) continue;
+      if (!best || item.href.length > best.href.length) {
+        best = { section: section.title, label: item.label, href: item.href };
+      }
+    }
+  }
+  if (!best) return null;
+  // On the menu page itself the heading already names it — the section alone is
+  // enough. A sub-page (detail, create) also gets a way back to its list.
+  return best.href === pathname
+    ? { section: best.section }
+    : { section: best.section, parent: { label: best.label, href: best.href } };
+}
 
 export function Header() {
   const { user, logout } = useAuth();
@@ -100,19 +138,30 @@ export function Header() {
   const unread = notif?.unread_count ?? 0;
   const isDashboard = pathname === "/";
   const firstName = user?.full_name?.split(" ")[0] ?? "";
+  const crumb = useBreadcrumb(pathname);
 
   return (
     <header className="flex items-start justify-between gap-4 py-8">
       <div className="min-w-0">
+        {/* Caption over the heading (style.md §8): where you are, not what shop
+            this is — the shop name is the logo on the rail, on every screen. */}
         {isDashboard && firstName ? (
           <p className="text-xs font-medium tracking-[0.4px] text-muted-foreground">
             Welcome back, <span className="font-semibold text-foreground">{firstName}</span>
           </p>
-        ) : (
-          <p className="text-xs font-medium uppercase tracking-[0.4px] text-muted-foreground">
-            Mahalakshmi Jewellers CRM
-          </p>
-        )}
+        ) : crumb ? (
+          <nav aria-label="Breadcrumb" className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+            <span className="truncate">{crumb.section}</span>
+            {crumb.parent ? (
+              <>
+                <ChevronRight className="h-3 w-3 shrink-0 opacity-60" aria-hidden />
+                <Link href={crumb.parent.href} className="truncate transition-colors hover:text-primary-strong hover:underline">
+                  {crumb.parent.label}
+                </Link>
+              </>
+            ) : null}
+          </nav>
+        ) : null}
         <h1 className="truncate text-[28px] font-bold leading-9 text-foreground">{title}</h1>
         {subtitle ? <p className="mt-0.5 text-sm text-muted-foreground">{subtitle}</p> : null}
       </div>

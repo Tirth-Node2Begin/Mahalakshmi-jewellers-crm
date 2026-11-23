@@ -25,6 +25,8 @@ use CRM\Validation\Validator;
 
 $user = requireApiAuth();
 $gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
+$billingGstVisibleOnly = GstVisibility::billingRestricted($user);
+$canUseNonGstBilling = GstVisibility::canUseNonGstBilling($user);
 
 // cost figures (and therefore margins) are only for those who can see the books
 $canSeeCost = checkPermission('reports.stock') || checkPermission('accounting.read');
@@ -34,7 +36,7 @@ if (Request::method() === 'GET') {
     $view = (string) ($_GET['view'] ?? 'list');
 
     if ($view === 'detail') {
-        $invoice = BillingRepository::detail((int) ($_GET['id'] ?? 0), $canSeeCost, $gstVisibleOnly);
+        $invoice = BillingRepository::detail((int) ($_GET['id'] ?? 0), $canSeeCost, $billingGstVisibleOnly);
         if ($invoice === null) {
             Response::error('NOT_FOUND', 'Bill not found.', 404);
         }
@@ -42,7 +44,7 @@ if (Request::method() === 'GET') {
     }
 
     if ($view === 'held') {
-        Response::success(['held' => BillingRepository::heldBills($user->id, $gstVisibleOnly)]);
+        Response::success(['held' => BillingRepository::heldBills($user->id, $billingGstVisibleOnly)]);
     }
 
     if ($view === 'lookup') {
@@ -71,7 +73,8 @@ if (Request::method() === 'GET') {
             'to' => $_GET['to'] ?? null,
             'customer_id' => $_GET['customer_id'] ?? null,
             'search' => $_GET['search'] ?? null,
-        ], gstVisibleOnly: $gstVisibleOnly),
+        ], gstVisibleOnly: $billingGstVisibleOnly),
+        'can_non_gst_billing' => $canUseNonGstBilling,
         'rates_set_today' => RateService::ratesSetFor(),
         'purities' => RateService::purities(),
         'categories' => BillingRepository::saleCategories(),
@@ -103,11 +106,11 @@ switch ($action) {
         if (!is_array($body['items'] ?? null) || $body['items'] === []) {
             Response::error('VALIDATION_ERROR', 'Add at least one item.', 422, ['items' => 'Add at least one item.']);
         }
-        // a non-taxable line or a manual rate is an override — gate it
+        // Non GST billing is owner-granted separately from rate/making overrides.
         foreach ($body['items'] as $line) {
             $treatment = $line['tax_treatment'] ?? 'taxable';
-            if ($treatment !== 'taxable' && !checkPermission('invoices.override')) {
-                Response::error('FORBIDDEN', 'You cannot mark a line as non-taxable.', 403);
+            if ($treatment !== 'taxable' && !$canUseNonGstBilling) {
+                Response::error('FORBIDDEN', 'You cannot make a Non GST bill.', 403);
             }
         }
 
@@ -118,7 +121,7 @@ switch ($action) {
         );
         Response::success([
             'id' => $invoiceId,
-            'invoice' => BillingRepository::detail($invoiceId, $canSeeCost, $gstVisibleOnly),
+            'invoice' => BillingRepository::detail($invoiceId, $canSeeCost, $billingGstVisibleOnly),
             'message' => 'Draft saved.',
         ]);
         // no break — Response::success() exits
@@ -141,11 +144,20 @@ switch ($action) {
                 Response::error('VALIDATION_ERROR', 'Choose a valid payment mode.', 422);
             }
         }
+        if (!$canUseNonGstBilling) {
+            $nonGstLines = (int) Database::fetchValue(
+                "SELECT COUNT(*) FROM invoice_items WHERE invoice_id = :id AND tax_treatment <> 'taxable'",
+                ['id' => $invoiceId]
+            );
+            if ($nonGstLines > 0) {
+                Response::error('FORBIDDEN', 'You cannot finalise a Non GST bill.', 403);
+            }
+        }
 
         BillingService::finalize($invoiceId, ['payments' => $payments], $user->id);
         Response::success([
             'id' => $invoiceId,
-            'invoice' => BillingRepository::detail($invoiceId, $canSeeCost, $gstVisibleOnly),
+            'invoice' => BillingRepository::detail($invoiceId, $canSeeCost, $billingGstVisibleOnly),
             'message' => 'Bill saved.',
         ]);
 
@@ -165,7 +177,7 @@ switch ($action) {
         requirePermission('invoices.read');
         $invoiceId = (int) ($body['id'] ?? 0);
         Audit::log($user->id, 'invoice.reprint', 'invoices', $invoiceId);
-        $invoice = BillingRepository::detail($invoiceId, $canSeeCost, $gstVisibleOnly);
+        $invoice = BillingRepository::detail($invoiceId, $canSeeCost, $billingGstVisibleOnly);
         if ($invoice === null) {
             Response::error('NOT_FOUND', 'Bill not found.', 404);
         }

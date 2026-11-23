@@ -25,10 +25,17 @@ interface NavContextValue {
 
 const NavContext = createContext<NavContextValue | null>(null);
 
-// Routes that no longer exist in this app. The nav API may still advertise them
-// until the backend catches up, so they are stripped here to avoid dead links.
+// Routes kept out of the menu. Two kinds:
+//   1. routes that no longer exist in this app — the nav API may still advertise
+//      them until the backend catches up, so they are stripped to avoid dead links;
+//   2. pages that still work but are deliberately hidden for now.
+// Hiding here only removes the menu entry. The page stays reachable by URL and
+// its permission is untouched, so putting it back is a one-line delete. To block
+// access as well, remove the item from NavMap::SECTIONS instead — allowed_hrefs
+// is built from that list, so dropping it there also fails routeIsAllowed().
 const HIDDEN_NAV_HREFS = new Set<string>([
-  "/leads",
+  // hidden on request 2026-08-04; page and audit.read permission both still live
+  "/settings/audit",
   "/leads/meetings",
   "/orders",
   "/repairs",
@@ -40,10 +47,8 @@ const HIDDEN_NAV_HREFS = new Set<string>([
   "/website/enquiries",
   "/website/settings",
   "/hr",
-  "/hr/employees",
   "/hr/attendance",
   "/hr/leaves",
-  "/hr/payroll",
   "/hr/settings",
   "/automation",
   "/dashboard/google",

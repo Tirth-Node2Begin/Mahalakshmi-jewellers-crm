@@ -116,7 +116,8 @@ final class ExpenseService
                 ['ledger_id' => Ledgers::expenseCategory($categoryId), 'dr' => $amount],
                 ['ledger_id' => Ledgers::forPaymentMode(
                     (string) $data['payment_mode'],
-                    $data['bank_account_id'] !== null ? (int) $data['bank_account_id'] : null
+                    $data['bank_account_id'] !== null ? (int) $data['bank_account_id'] : null,
+                    'out'
                 ), 'cr' => $amount],
             ],
             narration: (string) ($data['description'] ?? 'Expense'),

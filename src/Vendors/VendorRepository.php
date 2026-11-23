@@ -130,9 +130,18 @@ final class VendorRepository
     public static function pickList(bool $makersOnly = false): array
     {
         if ($makersOnly) {
-            $types = implode(',', array_map(static fn (string $t): string => "'$t'", \CRM\Vendors\VendorService::MAKER_TYPES));
+            // built-in makers + any shop-added type filed under Jewellery Makers
+            $types = VendorService::makerTypes();
+            $placeholders = [];
+            $params = [];
+            foreach ($types as $i => $type) {
+                $placeholders[] = ":t$i";
+                $params["t$i"] = $type;
+            }
+            $in = implode(',', $placeholders);
             return Database::fetchAll(
-                "SELECT id, name, vendor_type FROM suppliers WHERE vendor_status = 'active' AND vendor_type IN ($types) ORDER BY name"
+                "SELECT id, name, vendor_type FROM suppliers WHERE vendor_status = 'active' AND vendor_type IN ($in) ORDER BY name",
+                $params
             );
         }
         return Database::fetchAll(

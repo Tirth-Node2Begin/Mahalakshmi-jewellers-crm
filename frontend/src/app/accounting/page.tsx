@@ -34,8 +34,8 @@ export default function AccountingPage() {
   const [journalOpen, setJournalOpen] = useState(false);
 
   const { data, isLoading, isError } = useQuery({
-    queryKey: ["accounting", "coa"],
-    queryFn: () => accountingApi.coa(),
+    queryKey: ["accounting", "coa", to],
+    queryFn: () => accountingApi.coa(to),
   });
 
   const searching = search.trim().length > 0;
@@ -88,6 +88,7 @@ export default function AccountingPage() {
           <div>
             <Label htmlFor="coa-to">To</Label>
             <Input id="coa-to" type="date" value={to} onChange={(e) => setTo(e.target.value)} className="h-10 w-40" />
+            <p className="mt-1.5 text-xs text-muted-foreground">Balances are shown as on this date.</p>
           </div>
         </div>
 
@@ -181,10 +182,19 @@ function LedgerRow({ ledger, range }: { ledger: CoaLedger; range: { from: string
       </span>
       {ledger.is_system === 1 ? <Badge tone="gray">system</Badge> : null}
       {opening > 0 ? (
-        <span className="hidden text-xs text-muted-foreground tabular-nums sm:inline">
+        <span className="hidden text-xs text-muted-foreground tabular-nums lg:inline">
           Opening {formatCurrency(opening, true)} {ledger.opening_type === "cr" ? "Cr" : "Dr"}
         </span>
       ) : null}
+      {/* what the ledger stands at right now — the figure the owner came for */}
+      <span className="shrink-0 text-right">
+        <span className="block whitespace-nowrap text-sm font-semibold tabular-nums text-foreground">
+          {formatCurrency(ledger.balance, true)}
+          <span className="ml-1 text-xs font-medium text-muted-foreground">
+            {ledger.balance_type === "cr" ? "Cr" : "Dr"}
+          </span>
+        </span>
+      </span>
       <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
     </Link>
   );

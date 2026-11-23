@@ -72,9 +72,14 @@ if (Request::method() === 'GET') {
         Response::success(['voucher' => $voucher]);
     }
 
-    // default: chart of accounts + a flat ledger list for dropdowns
+    // default: chart of accounts + a flat ledger list for dropdowns.
+    // `as_on` (default today) is the date each ledger's balance is shown as on,
+    // so the page's date filter also moves the balances.
     Response::success([
-        'coa' => AccountingRepository::chartOfAccounts(),
+        'coa' => AccountingRepository::chartOfAccounts(
+            isset($_GET['as_on']) ? (string) $_GET['as_on'] : null,
+            $gstVisibleOnly
+        ),
         'groups' => Database::fetchAll(
             'SELECT id, name, parent_id, nature FROM account_groups ORDER BY sort_order, name'
         ),

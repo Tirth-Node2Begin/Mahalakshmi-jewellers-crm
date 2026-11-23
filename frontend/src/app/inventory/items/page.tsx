@@ -19,14 +19,14 @@ import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { Input } from "@/shared/ui/input";
-import { Pagination, usePagination } from "@/shared/ui/pagination";
+import { Pagination } from "@/shared/ui/pagination";
 import { Select } from "@/shared/ui/select";
 import { SkeletonRows } from "@/shared/ui/skeleton";
 import { cn } from "@/shared/utils/cn";
 import { formatWeight } from "@/shared/utils/format";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Gem, History, Pencil, Plus, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 const PER_PAGE = 15;
@@ -50,52 +50,44 @@ export default function StockItemsPage() {
   const rowRefs = useRef(new Map<number, HTMLTableRowElement>());
   const scrolledTo = useRef<number | null>(null);
 
-  const filters = {
+  const [page, setPage] = useState(1);
+  const filters = useMemo(() => ({
     search: search || undefined,
     metal: metal || undefined,
     purity_id: purityId || undefined,
     category_id: categoryId || undefined,
     tracking: tracking || undefined,
     status: status || undefined,
-  };
+  }), [search, metal, purityId, categoryId, tracking, status]);
+  const queryParams = useMemo(() => ({ ...filters, page, per_page: PER_PAGE }), [filters, page]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [filters]);
 
   const { data, isLoading } = useQuery({
-    queryKey: ["stock", "items", filters],
-    queryFn: () => stockApi.items(filters),
+    queryKey: ["stock", "items", queryParams],
+    queryFn: () => stockApi.items(queryParams),
+    placeholderData: keepPreviousData,
   });
   const { data: metalsData } = useMetals();
 
   const items = data?.items ?? [];
+  const totalPages = data?.pagination?.total_pages ?? 1;
   const purities = data?.purities ?? [];
   const categories = data?.categories ?? [];
   const metalPurities = metal ? purities.filter((p) => p.metal === metal) : purities;
-  const { page, totalPages, pageItems, setPage } = usePagination(items, PER_PAGE, [
-    search,
-    metal,
-    purityId,
-    categoryId,
-    tracking,
-    status,
-  ]);
 
   /**
-   * Walk to the saved item: the list may have re-fetched onto another page, so
-   * turn to its page first and scroll to the row on the render after that.
+   * Walk to the saved item when it is present on the current server page.
    * Scrolls once per save — a background refetch must not yank the view back.
    */
   useEffect(() => {
     if (selectedId === null || scrolledTo.current === selectedId) return;
-    const index = items.findIndex((i) => i.id === selectedId);
-    if (index === -1) return;
-
-    const target = Math.floor(index / PER_PAGE) + 1;
-    if (target !== page) {
-      setPage(target);
-      return;
-    }
+    if (!items.some((i) => i.id === selectedId)) return;
     scrolledTo.current = selectedId;
     rowRefs.current.get(selectedId)?.scrollIntoView({ behavior: "smooth", block: "center" });
-  }, [selectedId, items, page, setPage]);
+  }, [selectedId, items]);
 
   const clearFilters = () => {
     setRawSearch("");
@@ -143,6 +135,7 @@ export default function StockItemsPage() {
     if (isNew) {
       clearFilters();
       setStatus("in_stock");
+      setPage(1);
     }
     scrolledTo.current = null; // saving the same item twice should scroll to it again
     setSelectedId(id);
@@ -239,7 +232,7 @@ export default function StockItemsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {pageItems.map((it) => (
+                  {items.map((it) => (
                     <tr
                       key={it.id}
                       ref={(el) => {

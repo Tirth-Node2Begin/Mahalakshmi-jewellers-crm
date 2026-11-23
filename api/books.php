@@ -190,7 +190,8 @@ switch ($report) {
 
     case 'stock_movement':
         requirePermission('reports.stock');
-        $params = ['from' => $from, 'to' => $to];
+        $toExclusive = (new DateTimeImmutable($to))->modify('+1 day')->format('Y-m-d');
+        $params = ['from_ts' => $from . ' 00:00:00', 'to_exclusive' => $toExclusive . ' 00:00:00'];
         $sql = "SELECT t.id, t.item_id, t.created_at, t.type, t.reason, t.qty, t.weight, t.rate_per_gram, t.value,
                        t.adjustment_reason, i.item_code, i.name AS item_name, i.metal,
                        p.code AS purity_code, inv.invoice_no, pur.purchase_no, u.full_name AS user_name
@@ -200,7 +201,7 @@ switch ($report) {
              LEFT JOIN invoices inv ON inv.id = t.invoice_id
              LEFT JOIN purchases pur ON pur.id = t.purchase_id
              LEFT JOIN users u ON u.id = t.created_by
-                 WHERE DATE(t.created_at) BETWEEN :from AND :to";
+                 WHERE t.created_at >= :from_ts AND t.created_at < :to_exclusive";
         if ($gstVisibleOnly) {
             $sql .= ' AND ' . GstVisibility::stockMovementVisibleSql('t');
         }

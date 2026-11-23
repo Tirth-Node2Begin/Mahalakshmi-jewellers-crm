@@ -22,7 +22,7 @@ export function InventoryDashboard({ data }: { data: InventoryPayload }) {
           { label: "Add stock item", href: "/inventory?add=1", icon: PackagePlus, permission: "inventory.manage" },
           { label: "Adjust stock", href: "/inventory", icon: SlidersHorizontal, permission: "inventory.adjust" },
           { label: "Record purchase", href: "/vendors", icon: ShoppingCart, permission: "vendors.manage" },
-          { label: "Vendors", href: "/vendors", icon: Truck, permission: "vendors.read" },
+          { label: "Suppliers", href: "/vendors", icon: Truck, permission: "vendors.read" },
         ]}
       />
 

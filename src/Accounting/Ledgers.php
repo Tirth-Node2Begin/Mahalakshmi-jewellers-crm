@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace CRM\Accounting;
 
 use CRM\Database\Database;
+use CRM\Jewellery\Metals;
 
 /**
  * Resolves the system ledger ids the posting maps need (plan/05 §2), so no
@@ -100,22 +101,108 @@ final class Ledgers
         return self::$cache[$key] = (int) $id;
     }
 
-    /** Cash or the ledger of a specific bank account, chosen by payment mode. */
-    public static function forPaymentMode(string $mode, ?int $bankAccountId = null): int
+    /**
+     * The ledger money of a given payment mode lands in.
+     *
+     *   cash              → Cash in Hand
+     *   cheque IN         → Cheques in Hand (an asset in transit; it only reaches
+     *                       the bank when the cheque is marked cleared, so the
+     *                       bank ledger still reconciles to the bank statement)
+     *   cheque OUT        → the bank account itself: a cheque we hand over is
+     *                       recorded as money gone the moment it is written
+     *   bank / upi / card → the ledger of THAT bank account
+     *
+     * A bank account's ledger is created the first time money moves through it.
+     * Until this existed every non-cash rupee landed in one shared "Bank
+     * Account" ledger, so no account could be reconciled on its own.
+     *
+     * @param string $flow 'in' for money received, 'out' for money paid away
+     */
+    public static function forPaymentMode(string $mode, ?int $bankAccountId = null, string $flow = 'in'): int
     {
         if ($mode === 'cash') {
             return self::system('cash');
         }
-        if ($bankAccountId !== null) {
-            $id = Database::fetchValue(
-                'SELECT id FROM ledger_accounts WHERE linked_type = :t AND linked_id = :b LIMIT 1',
-                ['t' => 'bank', 'b' => $bankAccountId]
-            );
-            if ($id !== null) {
-                return (int) $id;
-            }
+        if ($mode === 'cheque' && $flow === 'in') {
+            return self::system('cheques_in_hand');
         }
-        return self::system('bank'); // default bank ledger
+        if ($bankAccountId !== null) {
+            return self::bankAccount($bankAccountId);
+        }
+        return self::system('bank'); // no account chosen — the catch-all bank ledger
+    }
+
+    /**
+     * The inventory ledger that carries an item's value.
+     *
+     * Old-metal buckets have their own ledger (Inventory — Old Metal) because
+     * that is where an exchange intake is debited. Picking the ledger by metal
+     * alone sent old metal OUT of Inventory — Gold while it had come IN to
+     * Inventory — Old Metal: the totals still balanced, so no integrity check
+     * caught it, but Old Metal inflated forever and Inventory — Gold drifted
+     * negative. Every stock posting must come through here.
+     */
+    public static function inventoryForItem(?string $itemType, ?string $metal): int
+    {
+        if ($itemType === 'old_metal') {
+            return self::system('old_metal');
+        }
+        // an item carrying no metal at all has always been taken in on the Old
+        // Metal ledger, so it has to leave from there too
+        if (!is_string($metal) || trim($metal) === '') {
+            return self::system('old_metal');
+        }
+        return self::system('inventory', Metals::normalise($metal));
+    }
+
+    /** The ledger of one bank account, created under Cash & Bank on first use. */
+    public static function bankAccount(int $bankAccountId): int
+    {
+        $key = 'bank#' . $bankAccountId;
+        if (isset(self::$cache[$key])) {
+            return self::$cache[$key];
+        }
+
+        $id = Database::fetchValue(
+            'SELECT id FROM ledger_accounts WHERE linked_type = :t AND linked_id = :b LIMIT 1',
+            ['t' => 'bank', 'b' => $bankAccountId]
+        );
+
+        if ($id === null) {
+            $account = Database::fetchOne(
+                'SELECT account_name, bank_name, account_number FROM bank_accounts WHERE id = :i',
+                ['i' => $bankAccountId]
+            );
+            if ($account === null) {
+                return self::$cache[$key] = self::system('bank');   // fall back to the catch-all
+            }
+            $groupId = Database::fetchValue(
+                "SELECT id FROM account_groups WHERE name = 'Cash & Bank' LIMIT 1"
+            );
+            if ($groupId === null) {
+                throw new \RuntimeException('Account group "Cash & Bank" is missing. Run database/seed.php.');
+            }
+            // "Current A/c ••4521 (HDFC Bank)": recognisable in a ledger list,
+            // without repeating a bank name the account is already named after
+            $name = trim((string) $account['account_name']);
+            if ($account['account_number'] !== null) {
+                $name .= ' ••' . mb_substr((string) $account['account_number'], -4);
+            }
+            $bankName = trim((string) ($account['bank_name'] ?? ''));
+            if ($bankName !== '' && mb_stripos($name, $bankName) === false) {
+                $name .= ' (' . $bankName . ')';
+            }
+            $id = Database::insert('ledger_accounts', [
+                'group_id' => (int) $groupId,
+                'name' => mb_substr($name, 0, 120),
+                'linked_type' => 'bank',
+                'linked_id' => $bankAccountId,
+                'opening_type' => 'dr',
+                'is_system' => 1,
+            ]);
+        }
+
+        return self::$cache[$key] = (int) $id;
     }
 
     /** Ledger id for a party, creating the sub-ledger under its parent group if absent. */

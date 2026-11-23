@@ -147,7 +147,12 @@ step('Vendors', function () use ($user): string {
     // a shop-added type (vendor_types master), so the "+ Add a new type…" flow
     // has visible demo data — angadia is the trade's traditional secure courier
     if (Database::fetchValue("SELECT id FROM vendor_types WHERE slug = 'angadia_courier'") === null) {
-        VendorService::addType(['label' => 'Angadia / Courier'], $user);
+        VendorService::addType(['label' => 'Angadia / Courier', 'category' => 'service'], $user);
+    }
+    // a shop-added MAKER type too, so the per-page add flow has demo data on more
+    // than one partner page (and shows up in the outsourcing picklist)
+    if (Database::fetchValue("SELECT id FROM vendor_types WHERE slug = 'casting_unit'") === null) {
+        VendorService::addType(['label' => 'Casting Unit', 'category' => 'maker'], $user);
     }
     $vendors = [
         ['name' => 'Vora Gold Refiners', 'vendor_type' => 'bullion', 'company' => 'Vora Gold Refiners Pvt Ltd', 'contact_person' => 'Jayesh Vora', 'mobile' => '9821330011', 'city' => 'Mumbai', 'state' => 'Maharashtra', 'gstin' => '27AABCV2233K1Z5', 'payment_terms' => '15 days credit'],
@@ -666,7 +671,7 @@ step('Expenses', function () use ($user, $ago): string {
 // ------------------------------------------------------------------ stock adjustment
 step('Stock adjustment (shortage)', function () use ($user): string {
     $item = Database::fetchOne(
-        "SELECT id, metal FROM inventory_items
+        "SELECT id, item_type, metal FROM inventory_items
           WHERE tracking = 'bulk' AND current_stock > 5 AND metal = 'silver' ORDER BY id DESC LIMIT 1"
     );
     if ($item === null) {
@@ -686,7 +691,7 @@ step('Stock adjustment (shortage)', function () use ($user): string {
                 vdate: date('Y-m-d'),
                 entries: [
                     ['ledger_id' => \CRM\Accounting\Ledgers::system('stock_adjust'), 'dr' => $value],
-                    ['ledger_id' => \CRM\Accounting\Ledgers::system('inventory', (string) $item['metal']), 'cr' => $value],
+                    ['ledger_id' => \CRM\Accounting\Ledgers::inventoryForItem($item['item_type'] ?? null, $item['metal'] ?? null), 'cr' => $value],
                 ],
                 narration: 'Stock adjustment — physical count shortage',
                 refType: 'stock_adjustment',

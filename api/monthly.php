@@ -21,12 +21,19 @@ if (Request::method() === 'GET') {
         "SELECT c.id, c.name, c.is_system, c.system_key
          FROM expense_categories c WHERE c.type = 'fixed' AND c.is_active = 1 ORDER BY c.name"
     );
+    // One query for every category's items, then group in PHP — this used to run
+    // a SELECT per category, so the page cost a round trip for each one.
+    $itemsByCategory = [];
+    foreach (Database::fetchAll(
+        "SELECT id, name, amount, category_id FROM fixed_cost_items
+          WHERE status = 'active' ORDER BY sort_order, name"
+    ) as $item) {
+        $categoryId = (int) $item['category_id'];
+        unset($item['category_id']);          // keep the response shape unchanged
+        $itemsByCategory[$categoryId][] = $item;
+    }
     foreach ($categories as &$cat) {
-        $cat['items'] = Database::fetchAll(
-            "SELECT id, name, amount FROM fixed_cost_items
-             WHERE category_id = :c AND status = 'active' ORDER BY sort_order, name",
-            ['c' => $cat['id']]
-        );
+        $cat['items'] = $itemsByCategory[(int) $cat['id']] ?? [];
     }
     unset($cat);
 
@@ -61,12 +68,15 @@ function payItem(int $itemId, int $month, int $year, array $meta, int $userId): 
     Database::fetchValue('SELECT id FROM fixed_cost_items WHERE id = :i FOR UPDATE', ['i' => $itemId]);
 
     $item = Database::fetchOne(
-        'SELECT fi.*, fi.category_id FROM fixed_cost_items fi
+        'SELECT fi.*, fi.category_id, c.system_key FROM fixed_cost_items fi
          JOIN expense_categories c ON c.id = fi.category_id WHERE fi.id = :i',
         ['i' => $itemId]
     );
     if ($item === null) {
         return; // vanished between the list and the submit — nothing to pay
+    }
+    if ((string) ($item['system_key'] ?? '') === 'SALARY') {
+        throw new \DomainException('Salary fixed costs are paid from HR Payroll.');
     }
     $amount = round((float) ($meta['amount'] ?? $item['amount']), 2);
     if ($amount <= 0) {
@@ -105,6 +115,17 @@ function payItem(int $itemId, int $month, int $year, array $meta, int $userId): 
     );
 }
 
+function isSalaryFixedItem(int $itemId): bool
+{
+    return (int) Database::fetchValue(
+        "SELECT COUNT(*)
+           FROM fixed_cost_items fi
+           JOIN expense_categories c ON c.id = fi.category_id
+          WHERE fi.id = :id AND c.system_key = 'SALARY'",
+        ['id' => $itemId]
+    ) > 0;
+}
+
 switch ($action) {
     case 'mark_paid': {
         requirePermission('expenses.create'); // writes an expense row
@@ -139,8 +160,13 @@ switch ($action) {
             'payment_mode' => 'nullable|in:cash,bank,upi,cheque,card',
             'bank_account_id' => 'nullable|int|min:1',
         ]);
-        Database::transaction(static function () use ($data, $body, $user): void {
+        $skippedSalary = 0;
+        Database::transaction(static function () use ($data, $body, $user, &$skippedSalary): void {
             foreach (array_unique(array_map('intval', (array) $body['item_ids'])) as $itemId) {
+                if (isSalaryFixedItem($itemId)) {
+                    $skippedSalary++;
+                    continue;
+                }
                 // skip if already paid this month
                 if ((int) Database::fetchValue('SELECT COUNT(*) FROM fixed_cost_monthly_payments WHERE fixed_cost_item_id = :i AND month = :m AND year = :y AND payment_status = \'paid\'', ['i' => $itemId, 'm' => $data['month'], 'y' => $data['year']]) > 0) {
                     continue;
@@ -151,9 +177,7 @@ switch ($action) {
                 ], $user->id);
             }
         });
-        // skipped_salary is retained (always 0) so existing clients keep parsing the response;
-        // salary is now an ordinary fixed cost since the payroll module was removed.
-        Response::success(['message' => 'Bulk payment recorded.', 'skipped_salary' => 0]);
+        Response::success(['message' => 'Bulk payment recorded.', 'skipped_salary' => $skippedSalary]);
     }
 
     case 'unpay': {
@@ -163,6 +187,9 @@ switch ($action) {
             'month' => 'required|int|min:1|max:12',
             'year' => 'required|int|min:2020|max:2100',
         ]);
+        if (isSalaryFixedItem((int) $data['fixed_cost_item_id'])) {
+            throw new \DomainException('Reverse salary payments from HR Payroll.');
+        }
         Database::transaction(static function () use ($data): void {
             $row = Database::fetchOne(
                 'SELECT id, expense_id FROM fixed_cost_monthly_payments WHERE fixed_cost_item_id = :i AND month = :m AND year = :y',

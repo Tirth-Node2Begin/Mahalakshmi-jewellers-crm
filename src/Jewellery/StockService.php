@@ -30,7 +30,7 @@ final class StockService
         self::assertInTransaction();
 
         $item = Database::fetchOne(
-            'SELECT id, item_code, name, status, tracking, metal, purity_id,
+            'SELECT id, item_code, name, status, tracking, item_type, metal, purity_id,
                     gross_weight, net_weight, avg_cost, current_stock
                FROM inventory_items WHERE id = :id FOR UPDATE',
             ['id' => $itemId]
@@ -47,19 +47,38 @@ final class StockService
                 $item['item_code']
             ));
         }
+        // `status` alone is not enough: a piece is created as in_stock and only
+        // becomes real stock when it is received (purchase or opening entry).
+        // Selling one that was never received drove its ledger negative and
+        // booked the sale at zero cost.
+        $available = self::availability($itemId);
+        if ($available['weight'] <= 0.0005) {
+            throw new \DomainException(sprintf(
+                'Item %s has not been taken into stock yet — record its purchase or opening stock first.',
+                $item['item_code']
+            ));
+        }
         return $item;
     }
 
     /**
      * Lock a bulk SKU and return how much is available right now.
-     * @throws \DomainException when the requested weight/qty exceeds stock
+     *
+     * Bulk stock is weight-first (plan/06 §1): a pool of raw gold or an old-metal
+     * bucket holds grams, and the piece count beside it is a loose tally that
+     * says nothing about how much metal can be sold. Gating a sale on that tally
+     * blocked real stock — a silver pool holding 6,393 g with a ledger qty of 0
+     * refused every sale — so availability is decided by WEIGHT alone. The qty
+     * is still written to the ledger; it is simply not a constraint.
+     *
+     * @throws \DomainException when the requested weight exceeds stock
      */
     public static function lockBulkForSale(int $itemId, float $qty, float $weight): array
     {
         self::assertInTransaction();
 
         $item = Database::fetchOne(
-            'SELECT id, item_code, name, status, tracking, metal, purity_id, avg_cost
+            'SELECT id, item_code, name, status, tracking, item_type, metal, purity_id, avg_cost
                FROM inventory_items WHERE id = :id FOR UPDATE',
             ['id' => $itemId]
         );
@@ -71,12 +90,12 @@ final class StockService
         }
 
         $available = self::availability($itemId);
-        if ($qty > $available['qty'] + 0.0005 || $weight > $available['weight'] + 0.0005) {
+        if ($weight > $available['weight'] + 0.0005) {
             throw new \DomainException(sprintf(
-                'Not enough stock for %s — available %.3f g (%.2f qty).',
-                $item['item_code'],
+                'Only %.3f g of %s is in stock — this bill needs %.3f g.',
                 $available['weight'],
-                $available['qty']
+                $item['item_code'],
+                $weight
             ));
         }
         return $item + $available;
@@ -192,19 +211,15 @@ final class StockService
     {
         return Database::fetchAll(
             "SELECT i.metal, p.code AS purity, i.tracking,
-                    COUNT(DISTINCT i.id) AS items,
-                    COALESCE(SUM(t.qty_net), 0) AS qty,
-                    COALESCE(SUM(t.weight_net), 0) AS weight,
-                    COALESCE(SUM(t.value_net), 0) AS value
+                    COUNT(*) AS items,
+                    COALESCE(SUM(CASE
+                        WHEN i.tracking = 'tagged' AND i.current_stock > 0.0005 THEN 1
+                        ELSE 0
+                    END), 0) AS qty,
+                    COALESCE(SUM(GREATEST(i.current_stock, 0)), 0) AS weight,
+                    COALESCE(SUM(GREATEST(i.current_stock, 0) * i.avg_cost), 0) AS value
                FROM inventory_items i
           LEFT JOIN purities p ON p.id = i.purity_id
-          LEFT JOIN (
-                    SELECT item_id,
-                           SUM(CASE WHEN type = 'in' THEN qty ELSE -qty END) AS qty_net,
-                           SUM(CASE WHEN type = 'in' THEN weight ELSE -weight END) AS weight_net,
-                           SUM(CASE WHEN type = 'in' THEN value ELSE -value END) AS value_net
-                      FROM inventory_transactions GROUP BY item_id
-                 ) t ON t.item_id = i.id
               WHERE i.is_active = 1 AND i.status <> 'removed'
               GROUP BY i.metal, p.code, i.tracking
               ORDER BY i.metal DESC, p.code"

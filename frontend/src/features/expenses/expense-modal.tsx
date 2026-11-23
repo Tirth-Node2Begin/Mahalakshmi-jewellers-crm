@@ -11,6 +11,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { localDateString } from "@/shared/utils/format";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { invalidateMoneyQueries } from "@/shared/api/invalidate-money";
 
 export function ExpenseModal({
   open,
@@ -74,6 +75,7 @@ export function ExpenseModal({
       else await expensesApi.create(payload);
       toast.success(isEdit ? "Expense updated." : "Expense recorded.");
       void queryClient.invalidateQueries({ queryKey: ["expenses"] });
+      invalidateMoneyQueries(queryClient);
       onClose();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Could not save expense.");

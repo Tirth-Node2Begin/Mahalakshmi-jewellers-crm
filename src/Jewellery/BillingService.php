@@ -98,7 +98,9 @@ final class BillingService
                 $oldMetal
             )), 2);
 
-            $discount = round((float) $invoice['discount_total'], 2);
+            // the whole-bill discount PLUS every per-line discount: both are real
+            // money off the bill and both belong in Discount Given
+            $discount = round((float) $invoice['bill_discount'] + $totals['discount'], 2);
             $beforeRounding = round(
                 $totals['metal'] + $totals['making'] - $discount + $totals['tax'] - $oldMetalValue,
                 2
@@ -109,12 +111,13 @@ final class BillingService
                 "UPDATE invoices SET
                     invoice_no = :no, status = 'final', finalized_at = NOW(),
                     subtotal = :sub, metal_total = :metal, making_total = :making,
-                    tax_total = :tax, cgst = :cgst, sgst = :sgst, igst = :igst,
+                    discount_total = :disc, tax_total = :tax, cgst = :cgst, sgst = :sgst, igst = :igst,
                     old_metal_value = :old, round_off = :ro, grand_total = :gt
                   WHERE id = :id",
                 [
                     'no' => $invoiceNo,
                     'sub' => round($totals['metal'] + $totals['making'], 2),
+                    'disc' => $discount,
                     'metal' => $totals['metal'],
                     'making' => $totals['making'],
                     'tax' => $totals['tax'],
@@ -130,7 +133,7 @@ final class BillingService
 
             // ---------- 4. stock out + COGS ----------
             $cogsTotal = 0.0;
-            $inventoryCredits = [];      // metal => cost released from inventory
+            $inventoryCredits = [];      // inventory ledger id => cost released
 
             foreach ($lines as $line) {
                 $itemId = $line['inventory_item_id'] !== null ? (int) $line['inventory_item_id'] : null;
@@ -168,8 +171,13 @@ final class BillingService
                 );
 
                 $cogsTotal += $cost;
-                $metal = Metals::normalise($item['metal'] ?? null);
-                $inventoryCredits[$metal] = ($inventoryCredits[$metal] ?? 0) + $cost;
+                // relieve the SAME ledger this stock was taken in on — an
+                // old-metal bucket leaves Inventory — Old Metal, not its metal
+                $inventoryLedger = Ledgers::inventoryForItem(
+                    $item['item_type'] ?? null,
+                    $item['metal'] ?? null
+                );
+                $inventoryCredits[$inventoryLedger] = ($inventoryCredits[$inventoryLedger] ?? 0) + $cost;
             }
 
             // ---------- 5. the sale voucher ----------
@@ -210,9 +218,9 @@ final class BillingService
             // cost of goods sold — makes the P&L show true gross profit
             if ($cogsTotal > 0.005) {
                 $entries[] = ['ledger_id' => Ledgers::system('cogs'), 'dr' => round($cogsTotal, 2)];
-                foreach ($inventoryCredits as $metal => $cost) {
+                foreach ($inventoryCredits as $ledgerId => $cost) {
                     if ($cost > 0.005) {
-                        $entries[] = ['ledger_id' => Ledgers::system('inventory', $metal), 'cr' => round($cost, 2)];
+                        $entries[] = ['ledger_id' => (int) $ledgerId, 'cr' => round($cost, 2)];
                     }
                 }
             }
@@ -367,6 +375,7 @@ final class BillingService
     {
         $metal = 0.0;
         $making = 0.0;
+        $lineDiscount = 0.0;
         $cgst = 0.0;
         $sgst = 0.0;
         $igst = 0.0;
@@ -376,6 +385,7 @@ final class BillingService
             $metalValue = (float) $line['metal_value'];
             $metal += $metalValue;
             $making += (float) $line['making_charge'];
+            $lineDiscount += (float) $line['discount'];
             $cgst += (float) $line['cgst'];
             $sgst += (float) $line['sgst'];
             $igst += (float) $line['igst'];
@@ -387,6 +397,7 @@ final class BillingService
         return [
             'metal' => round($metal, 2),
             'making' => round($making, 2),
+            'discount' => round($lineDiscount, 2),
             'cgst' => round($cgst, 2),
             'sgst' => round($sgst, 2),
             'igst' => round($igst, 2),

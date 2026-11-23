@@ -11,8 +11,9 @@ declare(strict_types=1);
  *   3. invoices.paid_amount matches its active receipts
  *   4. purchases.paid_amount matches its active vendor payments
  *   5. inventory_items.current_stock matches the stock ledger
- *   6. no tagged piece is marked in_stock while its ledger says it is sold
+ *   6. a tagged piece's status agrees with its ledger position (0 or 1)
  *   7. sales register total = GST outward turnover = P&L income
+ *   8. every inventory ledger carries exactly the stock that maps to it
  *
  * Run: php cli/verify-ledger.php
  * Exit code 0 = clean, 1 = drift found.
@@ -25,6 +26,7 @@ if (PHP_SAPI !== 'cli') {
 require_once dirname(__DIR__) . '/src/bootstrap.php';
 
 use CRM\Accounting\AccountingRepository;
+use CRM\Accounting\Ledgers;
 use CRM\Database\Database;
 use CRM\Jewellery\BillingRepository;
 use CRM\Support\FiscalYear;
@@ -107,14 +109,22 @@ foreach (array_slice($stockDrift, 0, 5) as $row) {
 }
 
 // 6. tagged pieces: status vs ledger position
+//
+// A tagged piece is ONE item, so its ledger position is only ever 0 or 1:
+//   - sold / removed      → nothing may be left on the shelf
+//   - in_stock, received  → exactly one piece must be left
+// An item created but not yet received has no ledger rows at all and is
+// legitimately in_stock: it is waiting for its opening-stock or purchase entry,
+// so it is not a mismatch.
 $statusDrift = Database::fetchAll(
     "SELECT i.id, i.item_code, i.status,
             COALESCE((SELECT SUM(CASE WHEN type = 'in' THEN qty ELSE -qty END)
-                        FROM inventory_transactions WHERE item_id = i.id), 0) AS net_qty
+                        FROM inventory_transactions WHERE item_id = i.id), 0) AS net_qty,
+            (SELECT COUNT(*) FROM inventory_transactions WHERE item_id = i.id) AS moves
        FROM inventory_items i
       WHERE i.tracking = 'tagged' AND i.is_active = 1
-     HAVING (i.status = 'in_stock' AND net_qty <= 0)
-         OR (i.status = 'sold' AND net_qty > 0)"
+     HAVING (i.status = 'in_stock' AND moves > 0 AND net_qty <> 1)
+         OR (i.status IN ('sold', 'removed') AND net_qty <> 0)"
 );
 report('tagged item status matches the ledger', $statusDrift === [], count($statusDrift) . ' mismatched');
 foreach (array_slice($statusDrift, 0, 5) as $row) {
@@ -127,9 +137,12 @@ foreach (array_slice($statusDrift, 0, 5) as $row) {
 // they sit on opposite sides of the tax line:
 //   - line discount (invoice_items.discount): pre-tax — Pricing computes
 //     taxable = metal + making − discount, and gstSummary already nets it;
-//   - bill discount (invoices.discount_total): a post-tax rebate — the grand
+//   - bill discount (invoices.bill_discount): a post-tax rebate — the grand
 //     total drops but GST was charged on the full value, so turnover keeps it
 //     (it shows in the P&L as the "Discount Given" contra instead).
+// Both land in Discount Given, which is why the P&L leg below has to put the
+// line discount back: turnover has already netted it, the Sales ledgers have
+// not (they are credited with the gross metal and making value).
 $gst = BillingRepository::gstSummary($fy['start'], $fy['end']);
 $pnl = AccountingRepository::profitAndLoss($fy['start'], $fy['end']);
 $register = BillingRepository::salesRegister($fy['start'], $fy['end']);
@@ -156,13 +169,65 @@ foreach ($pnl['income'] as $line) {
         $salesIncome += (float) $line['amount'];
     }
 }
+// the Sales ledgers carry the gross value, so take the pre-tax line discounts
+// back off to compare like with like
+$salesIncome -= $lineDiscounts;
 report(
     'GST turnover = P&L sales income (no sale recorded outside the books)',
     abs($gst['total_turnover'] - $salesIncome) < 0.05,
     sprintf('GST %.2f vs P&L %.2f', $gst['total_turnover'], $salesIncome)
 );
 
-// 8. every finalised bill has an active voucher
+// 8. each inventory ledger carries exactly the stock that maps to it
+//
+// The totals balancing is not enough: stock taken IN on one inventory ledger and
+// relieved from another leaves the trial balance at zero while both ledgers
+// drift — which is precisely what old metal did before it got its own mapping.
+// Ledgers::inventoryForItem() is the single source of that mapping, so this
+// check re-derives it in SQL and compares.
+$oldMetalLedger = Ledgers::system('old_metal');
+$inventoryDrift = [];
+foreach (Database::fetchAll(
+    "SELECT id, name FROM ledger_accounts WHERE linked_type IN ('inventory', 'old_metal') ORDER BY id"
+) as $ledger) {
+    $balance = (float) Database::fetchValue(
+        "SELECT ROUND(COALESCE(SUM(e.dr_amount - e.cr_amount), 0), 2)
+           FROM voucher_entries e
+           JOIN vouchers v ON v.id = e.voucher_id AND v.status = 'active'
+          WHERE e.ledger_id = :l",
+        ['l' => $ledger['id']]
+    );
+    $stockValue = (float) Database::fetchValue(
+        "SELECT ROUND(COALESCE(SUM(CASE WHEN t.type = 'in' THEN t.value ELSE -t.value END), 0), 2)
+           FROM inventory_transactions t
+           JOIN inventory_items i ON i.id = t.item_id
+          WHERE CASE
+                  WHEN i.item_type = 'old_metal' THEN :om1
+                  WHEN i.metal IS NULL OR i.metal = '' THEN :om2
+                  ELSE (SELECT x.id FROM ledger_accounts x
+                         WHERE x.linked_type = 'inventory' AND x.metal = i.metal LIMIT 1)
+                END = :l",
+        ['om1' => $oldMetalLedger, 'om2' => $oldMetalLedger, 'l' => $ledger['id']]
+    );
+    if (abs($balance - $stockValue) > 1.0) {
+        $inventoryDrift[] = [
+            'name' => $ledger['name'],
+            'ledger' => $balance,
+            'stock' => $stockValue,
+        ];
+    }
+}
+report(
+    'each inventory ledger matches the stock it carries',
+    $inventoryDrift === [],
+    count($inventoryDrift) . ' drifted'
+);
+foreach ($inventoryDrift as $row) {
+    printf("         %s: ledger %.2f vs stock %.2f
+", $row['name'], $row['ledger'], $row['stock']);
+}
+
+// 9. every finalised bill has an active voucher
 $missingVoucher = (int) Database::fetchValue(
     "SELECT COUNT(*) FROM invoices i
       LEFT JOIN vouchers v ON v.id = i.voucher_id

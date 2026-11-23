@@ -31,7 +31,6 @@ import type {
   PaymentMode,
   PriceMode,
 } from "@/features/billing/types";
-import { useAuth } from "@/lib/auth";
 import { usePermissions } from "@/lib/permissions";
 import { ApiError } from "@/shared/api/api-error";
 import { Badge } from "@/shared/ui/badge";
@@ -50,6 +49,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { invalidateMoneyQueries } from "@/shared/api/invalidate-money";
 
 /**
  * The four steps of a bill, shown ONE AT A TIME. The counter answers a single
@@ -83,10 +83,8 @@ function BillBuilder() {
   const params = useSearchParams();
   const urlId = Number(params.get("id")) || null;
   const queryClient = useQueryClient();
-  const { user } = useAuth();
   const { can, isLoading: permissionsLoading } = usePermissions();
   const canOverride = can("invoices.override");
-  const canSeeFullLedger = user?.username === "Admin";
   const defaultTaxRate = useDefaultTaxRate();
 
   const [draftId, setDraftId] = useState<number | null>(urlId);
@@ -126,6 +124,7 @@ function BillBuilder() {
   const categories = meta?.categories ?? [];
   const bankAccounts = meta?.bank_accounts ?? [];
   const ratesSetToday = meta?.rates_set_today ?? true;
+  const canUseNonGstBilling = meta?.can_non_gst_billing ?? false;
 
   const { data: heldData } = useQuery({
     queryKey: ["billing", "held"],
@@ -158,7 +157,9 @@ function BillBuilder() {
     const invoiceWithoutGst = invoice.items.length > 0 && invoice.items.every((item) => item.tax_treatment !== "taxable");
     setBillDate(invoice.invoice_date);
     setPriceMode(invoiceWithoutGst ? "without_gst" : invoice.price_mode);
-    setDiscount(num(invoice.discount_total));
+    // the whole-bill box holds only the whole-bill figure; the per-line
+    // discounts live on the lines and are summed into discount_total
+    setDiscount(num(invoice.bill_discount));
     setNotes(invoice.notes ?? "");
     setLines(
       invoice.items.map((item) => {
@@ -303,6 +304,7 @@ function BillBuilder() {
     void queryClient.invalidateQueries({ queryKey: ["billing"] });
     void queryClient.invalidateQueries({ queryKey: ["invoices"] });
     void queryClient.invalidateQueries({ queryKey: ["inventory"] });
+    invalidateMoneyQueries(queryClient);
   };
 
   /** Pull the server's version of the draft back onto the screen. */
@@ -383,10 +385,6 @@ function BillBuilder() {
       await billingApi.finalize(res.id, paymentPayload);
       invalidate();
       toast.success("Bill saved.");
-      if (!canSeeFullLedger && withoutGst) {
-        startNew();
-        return;
-      }
       router.push(`/invoices/detail?id=${res.id}&print=1`);
     } catch (e) {
       // 409 = another counter took the same piece first. Expected, not an error
@@ -561,6 +559,9 @@ function BillBuilder() {
         {step === 1 ? (
           <div className="space-y-4">
             <ItemSearch
+              // landing on this step must not grab the caret or open the list —
+              // the counter taps the box when they are ready
+              autoFocus={false}
               disabled={ratesBlock}
               categories={categories}
               excludeIds={lines.map((l) => l.item_id).filter((id): id is number => id !== null)}
@@ -628,7 +629,7 @@ function BillBuilder() {
               onPriceModeChange={setPriceMode}
               discount={discount}
               onDiscountChange={setDiscount}
-              allowWithoutGst={canOverride}
+              allowWithoutGst={canUseNonGstBilling}
             />
             <div>
               <p className="mb-3 text-xs font-medium uppercase tracking-[0.4px] text-muted-foreground">Money received</p>

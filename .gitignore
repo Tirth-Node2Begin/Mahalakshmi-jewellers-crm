@@ -1,4 +1,5 @@
 .env
+live/
 node_modules/
 frontend/out/
 frontend/.next/
@@ -6,3 +7,12 @@ uploads/
 *.tsbuildinfo
 
 frontend/next-env.d.ts
+
+# Local database backups — real customer/billing data, never commit
+backups/
+*.sql.gz
+
+# generated reports and unrelated documents kept beside the project, not part of it
+/AI-SEO-seminar-report*.docx
+/Jewellers-CRM-Project-Report.pdf
+/jewellers-crm-project-report.docx

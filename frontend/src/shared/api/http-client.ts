@@ -1,10 +1,9 @@
 import { AUTH_EXPIRED_EVENT, CSRF_COOKIE, getApiBase } from "@/configs/app.config";
-import { ApiError, normalizeApiError } from "./api-error";
+import { normalizeApiError } from "./api-error";
 
 /**
- * HttpClient — ported pattern from the reference CRM (planning/04 §4):
- * cookie credentials, X-CSRF-Token on mutations, no-store, one silent
- * refresh retry on 401, then a global auth-expired event.
+ * HttpClient - cookie credentials, X-CSRF-Token on mutations, no-store,
+ * one silent refresh retry on 401, then a global auth-expired event.
  */
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -19,6 +18,7 @@ interface RequestOptions {
 
 const MUTATION_METHODS: Method[] = ["POST", "PUT", "PATCH", "DELETE"];
 const AUTH_ENDPOINTS = ["v1/auth/login.php", "v1/auth/refresh.php", "v1/auth/logout.php"];
+const inFlightGetRequests = new Map<string, Promise<unknown>>();
 
 function readCookie(name: string): string | null {
   if (typeof document === "undefined") return null;
@@ -27,7 +27,10 @@ function readCookie(name: string): string | null {
 }
 
 function buildUrl(endpoint: string, params?: RequestOptions["params"]): string {
-  const url = new URL(`${getApiBase()}/${endpoint.replace(/^\//, "")}`, typeof window !== "undefined" ? window.location.origin : "http://localhost");
+  const url = new URL(
+    `${getApiBase()}/${endpoint.replace(/^\//, "")}`,
+    typeof window !== "undefined" ? window.location.origin : "http://localhost",
+  );
   if (params) {
     for (const [key, value] of Object.entries(params)) {
       if (value !== undefined && value !== null && value !== "") {
@@ -55,7 +58,7 @@ class HttpClient {
     let body: BodyInit | undefined;
 
     if (options.body instanceof FormData) {
-      body = options.body; // browser sets multipart boundary
+      body = options.body;
     } else if (options.body !== undefined) {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(options.body);
@@ -66,39 +69,58 @@ class HttpClient {
       if (csrf) headers["X-CSRF-Token"] = csrf;
     }
 
-    let response: Response;
-    try {
-      response = await fetch(buildUrl(endpoint, options.params), {
-        method,
-        headers,
-        body,
-        credentials: "include",
-        cache: "no-store",
-        signal: options.signal,
-      });
-    } catch (e) {
-      if (e instanceof DOMException && e.name === "AbortError") throw e;
-      throw new ApiError(0, endpoint);
+    const url = buildUrl(endpoint, options.params);
+    const dedupeKey = method === "GET" && !options.signal && !retriedAuth ? url : null;
+    if (dedupeKey) {
+      const existing = inFlightGetRequests.get(dedupeKey);
+      if (existing) return existing as Promise<T>;
     }
 
-    const parsed = await parseBody(response);
+    const run = async (): Promise<T> => {
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method,
+          headers,
+          body,
+          credentials: "include",
+          cache: "no-store",
+          signal: options.signal,
+        });
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") throw e;
+        throw normalizeApiError(null, 0, endpoint);
+      }
 
-    if (!response.ok) {
-      const isAuthEndpoint = AUTH_ENDPOINTS.some((a) => endpoint.includes(a));
-      if (response.status === 401 && !retriedAuth && !options.skipAuthRetry && !isAuthEndpoint) {
-        try {
-          await this.request("v1/auth/refresh.php", { method: "POST", skipAuthRetry: true }, true);
-          return this.request<T>(endpoint, options, true);
-        } catch {
-          if (typeof window !== "undefined") {
-            window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
+      const parsed = await parseBody(response);
+
+      if (!response.ok) {
+        const isAuthEndpoint = AUTH_ENDPOINTS.some((a) => endpoint.includes(a));
+        if (response.status === 401 && !retriedAuth && !options.skipAuthRetry && !isAuthEndpoint) {
+          try {
+            await this.request("v1/auth/refresh.php", { method: "POST", skipAuthRetry: true }, true);
+            return this.request<T>(endpoint, options, true);
+          } catch {
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
+            }
           }
         }
+        throw normalizeApiError(parsed, response.status, endpoint);
       }
-      throw normalizeApiError(parsed, response.status, endpoint);
-    }
 
-    return parsed as T;
+      return parsed as T;
+    };
+
+    if (!dedupeKey) return run();
+
+    const promise = run();
+    inFlightGetRequests.set(dedupeKey, promise);
+    try {
+      return await promise;
+    } finally {
+      inFlightGetRequests.delete(dedupeKey);
+    }
   }
 
   get<T>(endpoint: string, params?: RequestOptions["params"], signal?: AbortSignal): Promise<T> {

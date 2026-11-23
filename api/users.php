@@ -8,12 +8,16 @@ use CRM\Core\Request;
 use CRM\Core\Response;
 use CRM\Database\Database;
 use CRM\Support\Audit;
+use CRM\Support\GstVisibility;
 use CRM\Validation\Validator;
 
 $user = requireApiAuth();
+$canManageNonGstAccess = GstVisibility::canManageNonGstAccess($user);
 
 if (Request::method() === 'GET') {
     requirePermission('users.read');
+    $roleVisibilityJoin = $canManageNonGstAccess ? '' : " AND r.name <> 'non_gst_billing'";
+    $roleVisibilityWhere = $canManageNonGstAccess ? '' : " AND name <> 'non_gst_billing'";
     $rows = Database::fetchAll(
         "SELECT u.id, u.username, u.full_name, u.email, u.mobile, u.avatar_color,
                 u.is_active, u.must_change_password, u.last_login_at, u.created_at,
@@ -22,7 +26,7 @@ if (Request::method() === 'GET') {
          FROM users u
          LEFT JOIN user_role_assignments ura ON ura.user_id = u.id AND ura.is_active = 1
               AND (ura.expires_at IS NULL OR ura.expires_at > NOW())
-         LEFT JOIN roles r ON r.id = ura.role_id AND r.is_active = 1
+         LEFT JOIN roles r ON r.id = ura.role_id AND r.is_active = 1{$roleVisibilityJoin}
          GROUP BY u.id
          ORDER BY u.created_at DESC
          LIMIT 200"
@@ -34,7 +38,12 @@ if (Request::method() === 'GET') {
     }
     unset($row);
 
-    $roles = Database::fetchAll('SELECT id, name, display_name, data_scope FROM roles WHERE is_active = 1 ORDER BY id');
+    $roles = Database::fetchAll(
+        "SELECT id, name, display_name, data_scope
+           FROM roles
+          WHERE is_active = 1{$roleVisibilityWhere}
+          ORDER BY id"
+    );
     Response::success(['users' => $rows, 'roles' => $roles]);
 }
 
@@ -57,12 +66,17 @@ function assignRoles(int $userId, array $roleIds, \CRM\Auth\AuthUser $actor): vo
     }
     $roleIds = array_values(array_unique(array_map('intval', $roleIds)));
 
+    $canManageNonGstAccess = GstVisibility::canManageNonGstAccess($actor);
+
     // resolve requested roles once; reject unknown/inactive
     $roles = [];
     foreach ($roleIds as $roleId) {
-        $role = Database::fetchOne('SELECT id, is_system FROM roles WHERE id = :r AND is_active = 1', ['r' => $roleId]);
+        $role = Database::fetchOne('SELECT id, name, is_system FROM roles WHERE id = :r AND is_active = 1', ['r' => $roleId]);
         if ($role === null) {
             throw new RuntimeException('Unknown role selected.');
+        }
+        if (!$canManageNonGstAccess && (string) $role['name'] === 'non_gst_billing') {
+            \CRM\Core\Response::error('FORBIDDEN', 'Only Admin can assign Non GST billing access.', 403);
         }
         $roles[] = $role;
     }
@@ -71,8 +85,19 @@ function assignRoles(int $userId, array $roleIds, \CRM\Auth\AuthUser $actor): vo
         \CRM\Core\Response::error('FORBIDDEN', 'Only a super admin can grant system roles.', 403);
     }
 
-    Database::transaction(static function () use ($userId, $roles, $actor): void {
-        Database::execute('UPDATE user_role_assignments SET is_active = 0 WHERE user_id = :u', ['u' => $userId]);
+    Database::transaction(static function () use ($userId, $roles, $actor, $canManageNonGstAccess): void {
+        if ($canManageNonGstAccess) {
+            Database::execute('UPDATE user_role_assignments SET is_active = 0 WHERE user_id = :u', ['u' => $userId]);
+        } else {
+            Database::execute(
+                "UPDATE user_role_assignments ura
+                   JOIN roles r ON r.id = ura.role_id
+                    SET ura.is_active = 0
+                  WHERE ura.user_id = :u
+                    AND r.name <> 'non_gst_billing'",
+                ['u' => $userId]
+            );
+        }
         foreach ($roles as $role) {
             Database::execute(
                 'INSERT INTO user_role_assignments (user_id, role_id, assigned_by, is_active)

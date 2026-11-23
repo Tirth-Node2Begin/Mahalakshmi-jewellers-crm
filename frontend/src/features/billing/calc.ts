@@ -58,12 +58,14 @@ export function priceLine(line: BillLine, priceMode: PriceMode): PricedLine {
   const qty = Math.max(0, num(line.qty));
   const netWeight = Math.max(0, num(line.net_weight));
   const rate = Math.max(0, num(line.rate_per_gram));
-  const discount = Math.max(0, num(line.discount));
+  let discount = Math.max(0, num(line.discount));
 
   let metalValue = round2(netWeight * rate * qty);
   let making = round2(makingCharge(line.making_type, num(line.making_value), netWeight, metalValue, qty));
 
-  const taxable = Math.max(0, round2(metalValue + making - discount));
+  // a line cannot be discounted below nothing
+  discount = Math.min(discount, round2(metalValue + making));
+  const taxable = round2(metalValue + making - discount);
   const effectiveRate = line.tax_treatment === "taxable" ? Math.max(0, num(line.tax_rate)) : 0;
 
   let tax: number;
@@ -72,9 +74,17 @@ export function priceLine(line: BillLine, priceMode: PriceMode): PricedLine {
     tax = round2((taxable * effectiveRate) / (100 + effectiveRate));
     const net = round2(taxable - tax);
     lineTotal = taxable;
+    // every component is scaled by the SAME factor, so none can turn negative
+    // (mirrors Pricing::line on the server)
     const scale = taxable > 0 ? net / taxable : 1;
     metalValue = round2(metalValue * scale);
-    making = round2(net - metalValue);
+    making = round2(making * scale);
+    discount = round2(discount * scale);
+    const drift = round2(net - (metalValue + making - discount));
+    if (Math.abs(drift) > 0.001) {
+      if (metalValue >= making) metalValue = round2(metalValue + drift);
+      else making = round2(making + drift);
+    }
   } else {
     tax = round2((taxable * effectiveRate) / 100);
     lineTotal = round2(taxable + tax);
@@ -132,14 +142,16 @@ export function billTotals(
   }
 
   const oldMetalValue = round2(oldMetal.reduce((sum, row) => sum + priceOldMetal(row).value, 0));
-  const discount = round2(Math.max(0, num(billDiscount)));
+  // the whole-bill figure the user typed PLUS every per-line discount: both are
+  // real money off the bill and both have to leave the total
+  const discount = round2(Math.max(0, num(billDiscount)) + lineDiscount);
   const beforeRounding = round2(round2(metal) + round2(making) - discount + round2(tax) - oldMetalValue);
   const grand = applyRounding ? Math.round(beforeRounding) : beforeRounding;
 
   return {
     metal: round2(metal),
     making: round2(making),
-    discount: round2(discount + lineDiscount),
+    discount,
     tax: round2(tax),
     oldMetal: oldMetalValue,
     roundOff: round2(grand - beforeRounding),

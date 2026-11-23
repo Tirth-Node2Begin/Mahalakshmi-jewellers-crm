@@ -23,6 +23,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { toast } from "sonner";
+import { invalidateMoneyQueries } from "@/shared/api/invalidate-money";
 
 function PurchaseDetailInner() {
   const params = useSearchParams();
@@ -54,6 +55,7 @@ function PurchaseDetailInner() {
       void queryClient.invalidateQueries({ queryKey: ["purchases"] });
       void queryClient.invalidateQueries({ queryKey: ["stock"] });
       void queryClient.invalidateQueries({ queryKey: ["vendors"] });
+      invalidateMoneyQueries(queryClient);
       setCancelOpen(false);
       setReason("");
     } catch (e) {

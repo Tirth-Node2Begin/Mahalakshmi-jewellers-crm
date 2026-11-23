@@ -23,9 +23,14 @@ export interface PickedItem {
  *
  * Enter  → ?view=lookup (tag / barcode / HUID). Found → the line is added.
  * Typing → ?view=search_items type-ahead; ↑/↓ to choose, Enter to add.
- * Focus  → the dropdown opens on its own with the first items in stock, so the
- *          counter can pick from a list without knowing what to type. The
- *          category chips (Ring, Chain, …) narrow that list.
+ * Tap    → the dropdown opens with the first items in stock, so the counter can
+ *          pick from a list without knowing what to type. The category chips
+ *          (Ring, Chain, …) narrow that list.
+ *
+ * Arriving on the step touches nothing: no caret, no list. The billing and
+ * estimate screens pass `autoFocus={false}` because landing on the step with
+ * the box already live — and a list covering the page — reads as something
+ * gone wrong rather than as an invitation.
  * Pick   → the list closes; the caret stays in the box for the scanner, and a
  *          tap or a keystroke brings the list back for the next item.
  *
@@ -86,8 +91,19 @@ export function ItemSearch({
 
   // the scanner needs the caret to live here — take it back after every add
   const focus = () => requestAnimationFrame(() => inputRef.current?.focus());
+  /**
+   * Set while we move the caret here ourselves, so the focus event that follows
+   * does not open the browse list. Only a focus the USER asked for (a tap, a
+   * keystroke, ↓) should do that.
+   */
+  const selfFocusing = useRef(false);
+  const focusQuietly = () => {
+    selfFocusing.current = true;
+    focus();
+  };
   useEffect(() => {
-    if (autoFocus && !disabled) focus();
+    if (autoFocus && !disabled) focusQuietly();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFocus, disabled]);
 
   // tapping anywhere outside puts the dropdown away
@@ -173,10 +189,20 @@ export function ItemSearch({
         ref={inputRef}
         value={term}
         disabled={disabled}
-        onFocus={() => setOpen(true)}
-        // after an add the caret stays here (for the scanner) — a click on an
-        // already-focused input fires no focus event, so reopen on click too
-        onClick={() => setOpen(true)}
+        onFocus={() => {
+          // a caret we placed ourselves must not drag the list open with it
+          if (selfFocusing.current) {
+            selfFocusing.current = false;
+            return;
+          }
+          setOpen(true);
+        }}
+        // Reopen when the box itself is pressed — a box that already holds the
+        // caret fires no focus event, so onFocus alone would not answer a tap.
+        // mousedown, not click: a click whose press began on another control
+        // (picking the customer, which advances the page onto this box) must
+        // not drag the list open on the way in.
+        onMouseDown={() => setOpen(true)}
         onChange={(e) => {
           setTerm(e.target.value);
           setHighlight(0);

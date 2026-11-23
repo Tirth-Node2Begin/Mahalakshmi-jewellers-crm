@@ -204,6 +204,9 @@ final class BillingRepository
         $invoice['metal_total'] = round($metal, 2);
         $invoice['making_total'] = round($making, 2);
         $invoice['discount_total'] = round($discount, 2);
+        // the visible total is rebuilt from the visible lines alone, so the
+        // whole-bill discount plays no part in it
+        $invoice['bill_discount'] = 0.0;
         $invoice['tax_total'] = round($tax, 2);
         $invoice['cgst'] = round($cgst, 2);
         $invoice['sgst'] = round($sgst, 2);
@@ -244,8 +247,23 @@ final class BillingRepository
      */
     public static function searchItems(string $term, ?int $categoryId = null, int $limit = 20): array
     {
-        $like = '%' . $term . '%';
-        $params = ['q1' => $like, 'q2' => $like, 'q3' => $like, 'q4' => $like];
+        $params = [];
+        $searchFilter = '';
+        $orderBy = 'i.name';
+        if ($term !== '') {
+            $like = '%' . $term . '%';
+            $searchFilter = ' AND (i.item_code LIKE :q1 OR i.name LIKE :q2 OR i.barcode LIKE :q3 OR i.huid LIKE :q4)';
+            $params += [
+                'q1' => $like,
+                'q2' => $like,
+                'q3' => $like,
+                'q4' => $like,
+                'exact_code' => $term,
+                'exact_barcode' => $term,
+                'exact_huid' => $term,
+            ];
+            $orderBy = '(i.item_code = :exact_code) DESC, (i.barcode = :exact_barcode) DESC, (i.huid = :exact_huid) DESC, i.name';
+        }
         $categoryFilter = '';
         if ($categoryId !== null) {
             $categoryFilter = ' AND i.category_id = :category_id';
@@ -261,9 +279,9 @@ final class BillingRepository
           LEFT JOIN inventory_categories c ON c.id = i.category_id
               WHERE i.is_active = 1
                 AND (i.tracking = 'bulk' OR i.status = 'in_stock')
-                AND (i.item_code LIKE :q1 OR i.name LIKE :q2 OR i.barcode LIKE :q3 OR i.huid LIKE :q4)
+                {$searchFilter}
                 {$categoryFilter}
-              ORDER BY i.name
+              ORDER BY {$orderBy}
               LIMIT " . max(1, min(50, $limit)),
             $params
         );

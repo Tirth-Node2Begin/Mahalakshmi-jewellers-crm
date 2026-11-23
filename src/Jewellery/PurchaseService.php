@@ -56,7 +56,7 @@ final class PurchaseService
 
             $subtotal = 0.0;
             $taxTotal = 0.0;
-            $inventoryDebits = [];     // metal => value
+            $inventoryDebits = [];     // inventory ledger id => value
             $serviceTotal = 0.0;
 
             foreach ($lines as $line) {
@@ -110,7 +110,18 @@ final class PurchaseService
                         userId: $userId
                     );
 
-                    $inventoryDebits[$metal] = ($inventoryDebits[$metal] ?? 0) + $amount;
+                    // debit the ledger that actually carries this item's stock:
+                    // buying old metal from a refiner lands on Inventory — Old
+                    // Metal, which is also where a sale will relieve it
+                    $stockItem = Database::fetchOne(
+                        'SELECT item_type, metal FROM inventory_items WHERE id = :id',
+                        ['id' => $itemId]
+                    ) ?? [];
+                    $inventoryLedger = Ledgers::inventoryForItem(
+                        $stockItem['item_type'] ?? null,
+                        $stockItem['metal'] ?? $metal
+                    );
+                    $inventoryDebits[$inventoryLedger] = ($inventoryDebits[$inventoryLedger] ?? 0) + $amount;
                 } else {
                     $serviceTotal += $amount;
                 }
@@ -151,8 +162,8 @@ final class PurchaseService
 
             // ---- voucher: Dr Inventory/Wages + Dr GST Input   Cr Vendor ----
             $entries = [];
-            foreach ($inventoryDebits as $metal => $value) {
-                $entries[] = ['ledger_id' => Ledgers::system('inventory', $metal), 'dr' => round($value, 2)];
+            foreach ($inventoryDebits as $ledgerId => $value) {
+                $entries[] = ['ledger_id' => (int) $ledgerId, 'dr' => round($value, 2)];
             }
             if ($serviceTotal > 0.005) {
                 $entries[] = ['ledger_id' => Ledgers::system('expense'), 'dr' => round($serviceTotal, 2)];
