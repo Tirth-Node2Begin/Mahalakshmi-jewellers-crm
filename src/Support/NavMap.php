@@ -17,12 +17,18 @@ final class NavMap
         ['title' => 'Overview', 'items' => [
             ['label' => 'Dashboard', 'href' => '/', 'icon' => 'layout-dashboard', 'permission' => 'dashboard.read'],
         ]],
+        // Leads before Customers: an enquiry becomes a customer, so the menu
+        // follows the order the shop works in.
+        ['title' => 'Customers & Leads', 'items' => [
+            ['label' => 'Leads', 'href' => '/leads', 'icon' => 'contact', 'permission' => 'leads.read'],
+            ['label' => 'Customers', 'href' => '/customers', 'icon' => 'users', 'permission' => 'customers.read'],
+        ]],
         // "New Bill" / "New Purchase" are NOT menu items — each list page carries
         // its own primary button top-right, so the menu stays one row per section.
         ['title' => 'Billing', 'items' => [
             ['label' => 'Bills', 'href' => '/invoices', 'icon' => 'receipt-indian-rupee', 'permission' => 'invoices.read'],
             ['label' => 'Estimates', 'href' => '/estimates', 'icon' => 'file-pen-line', 'permission' => 'estimates.read'],
-            ['label' => 'Money Received', 'href' => '/payments', 'icon' => 'wallet', 'permission' => 'payments.create'],
+            ['label' => 'Payment', 'href' => '/payments', 'icon' => 'wallet', 'permission' => 'payments.create'],
         ]],
         ['title' => 'Inventory', 'items' => [
             ['label' => "Today's Rates", 'href' => '/rates', 'icon' => 'trending-up', 'permission' => 'rates.read'],
@@ -34,10 +40,15 @@ final class NavMap
         ['title' => 'Purchases', 'items' => [
             ['label' => 'Purchases', 'href' => '/purchases', 'icon' => 'package', 'permission' => 'purchases.read'],
         ]],
-        ['title' => 'Parties', 'items' => [
-            ['label' => 'Customers', 'href' => '/customers', 'icon' => 'users', 'permission' => 'customers.read'],
-            ['label' => 'Vendors', 'href' => '/vendors', 'icon' => 'hammer', 'permission' => 'vendors.read'],
+        ['title' => 'Suppliers & Makers', 'items' => [
+            ['label' => 'Suppliers', 'href' => '/vendors', 'icon' => 'truck', 'permission' => 'vendors.read'],
+            ['label' => 'Jewellery Makers', 'href' => '/vendors/makers', 'icon' => 'hammer', 'permission' => 'vendors.read'],
+            ['label' => 'Services & Others', 'href' => '/vendors/services', 'icon' => 'wrench', 'permission' => 'vendors.read'],
             ['label' => 'Vendor Payments', 'href' => '/vendors/payments', 'icon' => 'banknote', 'permission' => 'payments.vendor'],
+        ]],
+        ['title' => 'HR', 'items' => [
+            ['label' => 'Employees', 'href' => '/hr/employees', 'icon' => 'id-card', 'permission' => 'hr.read'],
+            ['label' => 'Payroll', 'href' => '/hr/payroll', 'icon' => 'wallet', 'permission' => 'hr.payroll.read'],
         ]],
         ['title' => 'Accounting', 'items' => [
             // the journal is a dialog on /accounting, not its own route

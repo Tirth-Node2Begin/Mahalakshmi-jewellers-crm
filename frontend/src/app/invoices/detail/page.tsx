@@ -17,6 +17,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { toast } from "sonner";
+import { invalidateMoneyQueries } from "@/shared/api/invalidate-money";
 
 /**
  * One bill, and the paper it prints on.
@@ -53,6 +54,7 @@ function BillDetail() {
       setReason("");
       void queryClient.invalidateQueries({ queryKey: ["billing"] });
       void queryClient.invalidateQueries({ queryKey: ["inventory"] });
+      invalidateMoneyQueries(queryClient);
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : "Could not cancel the bill."),
   });

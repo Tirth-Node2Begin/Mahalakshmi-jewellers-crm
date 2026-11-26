@@ -28,6 +28,7 @@ final class NumberSequence
         'vendor_payment' => ['prefix' => 'PAY-', 'padding' => 5],
         'voucher' => ['prefix' => 'VCH-', 'padding' => 5],
         'customer' => ['prefix' => 'CUST-', 'padding' => 4],
+        'employee' => ['prefix' => 'EMP-', 'padding' => 4],
         'vendor' => ['prefix' => 'VEN-', 'padding' => 4],
         'item_rm' => ['prefix' => 'RM-', 'padding' => 4],
         'item_st' => ['prefix' => 'ST-', 'padding' => 4],

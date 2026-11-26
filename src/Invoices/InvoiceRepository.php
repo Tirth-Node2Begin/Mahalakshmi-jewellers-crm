@@ -169,8 +169,8 @@ final class InvoiceRepository
         $where = implode(' AND ', $conditions);
         $amountSql = GstVisibility::paymentAmountSql('p', $gstVisibleOnly);
         return Database::fetchAll(
-            "SELECT p.receipt_no, ROUND({$amountSql}, 2) AS amount, p.payment_date, p.payment_mode, b.account_name AS bank_name,
-                    p.cheque_number, p.cheque_status, p.notes,
+            "SELECT p.id, p.receipt_no, ROUND({$amountSql}, 2) AS amount, p.payment_date, p.payment_mode, b.account_name AS bank_name,
+                    p.cheque_number, p.cheque_status, p.cheque_cleared_at, p.bank_account_id, p.notes,
                     i.id AS invoice_id, i.invoice_no, i.status AS invoice_status,
                     COALESCE(c.name, pc.name, i.walkin_name, 'Walk-in') AS customer_name
              FROM invoice_payments p

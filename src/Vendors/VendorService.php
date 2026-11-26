@@ -19,43 +19,104 @@ final class VendorService
     /** Types that actually make jewellery — shown when an order is outsourced. */
     public const MAKER_TYPES = ['karigar', 'manufacturer'];
     public const STATUSES = ['active', 'inactive', 'blacklisted'];
+    /** The three partner pages a type can belong to (frontend PARTNER_PAGES). */
+    public const CATEGORIES = ['supplier', 'maker', 'service'];
 
     /**
      * Shop-added types from the vendor_types master (2026_08_01 migration) —
      * the built-ins above stay in code because the category tabs and the maker
      * picklist depend on them.
      *
-     * @return list<array{id:int,slug:string,label:string}>
+     * `category` is the partner page the type was added from, so a shop-added
+     * type stays on that page instead of everything landing in Services.
+     *
+     * @return list<array{id:int,slug:string,label:string,category:string}>
      */
     public static function customTypes(): array
     {
+        // Saving a vendor asks for this list, so a server whose database is a
+        // migration behind must degrade to the built-in types rather than take
+        // the whole vendor book down with a 500. Both partial states are real:
+        // 2026_08_01 creates the table, 2026_08_02 adds `category`.
+        try {
+            $rows = Database::fetchAll('SELECT id, slug, label, category FROM vendor_types ORDER BY label');
+        } catch (\PDOException $e) {
+            try {
+                $rows = Database::fetchAll('SELECT id, slug, label FROM vendor_types ORDER BY label');
+            } catch (\PDOException $missingTable) {
+                error_log('[jewellers-crm] vendor_types unavailable — run the 2026_08_01/2026_08_02 migrations: ' . $missingTable->getMessage());
+                return [];
+            }
+        }
+
         return array_map(
-            static fn (array $r): array => ['id' => (int) $r['id'], 'slug' => (string) $r['slug'], 'label' => (string) $r['label']],
-            Database::fetchAll('SELECT id, slug, label FROM vendor_types ORDER BY label')
+            static fn (array $r): array => [
+                'id' => (int) $r['id'],
+                'slug' => (string) $r['slug'],
+                'label' => (string) $r['label'],
+                // no `category` column yet = every type is a Service, as it was
+                // before 2026_08_02 split them across the three partner pages
+                'category' => (string) ($r['category'] ?? 'service'),
+            ],
+            $rows
         );
+    }
+
+    /**
+     * Every type that can be given a job: the built-in makers plus any custom
+     * type the shop filed under Jewellery Makers.
+     *
+     * @return list<string>
+     */
+    public static function makerTypes(): array
+    {
+        $custom = array_column(
+            array_filter(self::customTypes(), static fn (array $t): bool => $t['category'] === 'maker'),
+            'slug'
+        );
+        return array_values(array_merge(self::MAKER_TYPES, $custom));
     }
 
     /**
      * Adds a custom vendor type. The slug (what suppliers.vendor_type stores) is
      * derived from the label the same way Metals::create() derives a code.
      *
-     * @return array{id:int,slug:string,label:string}
+     * @return array{id:int,slug:string,label:string,category:string}
      */
     public static function addType(array $body, AuthUser $user): array
     {
-        $data = Validator::validate($body, ['label' => 'required|string|min:2|max:60']);
+        $data = Validator::validate($body, [
+            'label' => 'required|string|min:2|max:60',
+            'category' => 'nullable|in:' . implode(',', self::CATEGORIES),
+        ]);
         $label = (string) $data['label'];
+        $category = (string) ($data['category'] ?? 'service');
         $slug = substr(trim(preg_replace('/[^a-z0-9]+/', '_', strtolower($label)) ?? '', '_'), 0, 30);
         if ($slug === '') {
             throw new \DomainException('The type name needs at least one letter or number.');
         }
-        $exists = in_array($slug, self::TYPES, true)
-            || Database::fetchOne('SELECT id FROM vendor_types WHERE slug = :s OR label = :l', ['s' => $slug, 'l' => $label]) !== null;
-        if ($exists) {
+        if (in_array($slug, self::TYPES, true)) {
             throw new \DomainException('That type already exists — pick it from the list.');
         }
-        $id = Database::insert('vendor_types', ['slug' => $slug, 'label' => $label, 'created_by' => $user->id]);
-        return ['id' => $id, 'slug' => $slug, 'label' => $label];
+
+        try {
+            if (Database::fetchOne('SELECT id FROM vendor_types WHERE slug = :s OR label = :l', ['s' => $slug, 'l' => $label]) !== null) {
+                throw new \DomainException('That type already exists — pick it from the list.');
+            }
+            $id = Database::insert('vendor_types', [
+                'slug' => $slug,
+                'label' => $label,
+                'category' => $category,
+                'created_by' => $user->id,
+            ]);
+        } catch (\PDOException $e) {
+            // an unmigrated server would otherwise answer a plain "something went
+            // wrong" — say what is actually missing
+            error_log('[jewellers-crm] add_type failed: ' . $e->getMessage());
+            throw new \DomainException('Custom types are not set up on this server yet. Run the vendor_types migrations listed in DEPLOY.md, then try again.');
+        }
+
+        return ['id' => $id, 'slug' => $slug, 'label' => $label, 'category' => $category];
     }
 
     public static function save(array $body, AuthUser $user): int

@@ -15,13 +15,13 @@ import {
 } from "react";
 
 /**
- * The whole CRM is served under an obscure basePath (see next.config.ts) on the
- * website's domain — e.g. /gate-7q4k9x2z/login. Next's router auto-applies the
+ * The CRM is served at the root of its own subdomain
+ * (https://jeweller-crm.node2begin.com). Next's router auto-applies the
  * basePath, so app routes use plain paths ("/login"); only raw window.location
  * redirects (logout) must prepend BASE_PATH. Keep BASE_PATH in sync with next.config.
  */
 export const LOGIN_PATH = "/login";
-export const BASE_PATH = "/gate-7q4k9x2z";
+export const BASE_PATH = "";
 
 export interface SessionUser {
   id: number;

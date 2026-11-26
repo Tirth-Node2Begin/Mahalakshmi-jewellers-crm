@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace CRM\Support;
 
+use CRM\Auth\AuthUser;
 use CRM\Database\Database;
 
 final class GstVisibility
@@ -11,6 +12,42 @@ final class GstVisibility
     public static function restrictedUsername(?string $username): bool
     {
         return $username !== 'Admin';
+    }
+
+    public static function canUseNonGstBilling(AuthUser $user): bool
+    {
+        return !self::restrictedUsername($user->username)
+            || self::hasExplicitPermission($user->id, 'invoices', 'non_gst');
+    }
+
+    public static function canManageNonGstAccess(AuthUser $user): bool
+    {
+        return !self::restrictedUsername($user->username);
+    }
+
+    public static function billingRestricted(AuthUser $user): bool
+    {
+        return self::restrictedUsername($user->username) && !self::canUseNonGstBilling($user);
+    }
+
+    private static function hasExplicitPermission(int $userId, string $resource, string $action): bool
+    {
+        return Database::fetchValue(
+            "SELECT 1
+               FROM user_role_assignments ura
+               JOIN roles r ON r.id = ura.role_id
+               JOIN role_permission_grants g ON g.role_id = r.id
+               JOIN permissions p ON p.id = g.permission_id
+              WHERE ura.user_id = :uid
+                AND ura.is_active = 1
+                AND (ura.expires_at IS NULL OR ura.expires_at > NOW())
+                AND r.is_active = 1
+                AND p.is_active = 1
+                AND p.resource = :resource
+                AND p.action = :action
+              LIMIT 1",
+            ['uid' => $userId, 'resource' => $resource, 'action' => $action]
+        ) !== null;
     }
 
     public static function lineVisibleSql(string $lineAlias): string

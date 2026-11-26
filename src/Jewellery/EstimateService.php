@@ -41,7 +41,7 @@ final class EstimateService
                 Database::execute(
                     'UPDATE estimates SET customer_id = :c, walkin_name = :wn, walkin_phone = :wp,
                             estimate_date = :d, valid_until = :vu, price_mode = :pm,
-                            discount_total = :disc, notes = :n
+                            bill_discount = :disc, notes = :n
                       WHERE id = :id',
                     [
                         'c' => $customerId,
@@ -65,7 +65,7 @@ final class EstimateService
                     'estimate_date' => $date,
                     'valid_until' => $validUntil,
                     'price_mode' => $priceMode,
-                    'discount_total' => round((float) ($input['discount'] ?? 0), 2),
+                    'bill_discount' => round((float) ($input['discount'] ?? 0), 2),
                     'notes' => $input['notes'] ?? null,
                     'status' => 'open',
                     'created_by' => $userId,
@@ -73,14 +73,17 @@ final class EstimateService
             }
 
             $totals = self::writeLines($estimateId, $input['items'] ?? [], $date, $priceMode);
-            $discount = round((float) ($input['discount'] ?? 0), 2);
+            // the whole-estimate figure the user typed PLUS every per-line discount
+            $billDiscount = round((float) ($input['discount'] ?? 0), 2);
+            $discount = round($billDiscount + $totals['discount'], 2);
             $grandTotal = round($totals['metal'] + $totals['making'] - $discount + $totals['tax'], 2);
 
             Database::execute(
-                'UPDATE estimates SET metal_total = :m, making_total = :mk, tax_estimate = :t, grand_total = :g
+                'UPDATE estimates SET metal_total = :m, making_total = :mk, discount_total = :disc,
+                        tax_estimate = :t, grand_total = :g
                   WHERE id = :id',
                 [
-                    'm' => $totals['metal'], 'mk' => $totals['making'],
+                    'm' => $totals['metal'], 'mk' => $totals['making'], 'disc' => $discount,
                     't' => $totals['tax'], 'g' => $grandTotal, 'id' => $estimateId,
                 ]
             );
@@ -141,7 +144,8 @@ final class EstimateService
                 'walkin_phone' => $estimate['walkin_phone'],
                 'invoice_date' => date('Y-m-d'),
                 'price_mode' => $estimate['price_mode'],
-                'discount' => (float) $estimate['discount_total'],
+                // the whole-estimate discount only: the per-line ones travel on $items
+                'discount' => (float) $estimate['bill_discount'],
                 'items' => $items,
             ], $userId);
 
@@ -239,6 +243,7 @@ final class EstimateService
     {
         $metal = 0.0;
         $making = 0.0;
+        $lineDiscount = 0.0;
         $tax = 0.0;
 
         $defaultTaxRate = (float) (Database::fetchValue(
@@ -292,9 +297,15 @@ final class EstimateService
 
             $metal += $priced['metal_value'];
             $making += $priced['making_charge'];
+            $lineDiscount += $priced['discount'];
             $tax += $priced['tax_amount'];
         }
 
-        return ['metal' => round($metal, 2), 'making' => round($making, 2), 'tax' => round($tax, 2)];
+        return [
+            'metal' => round($metal, 2),
+            'making' => round($making, 2),
+            'discount' => round($lineDiscount, 2),
+            'tax' => round($tax, 2),
+        ];
     }
 }

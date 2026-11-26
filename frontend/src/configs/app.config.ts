@@ -2,10 +2,9 @@
 
 export function getApiBase(): string {
   if (process.env.NODE_ENV === "production") {
-    // Deployed self-contained under /crm/ (endpoints at /crm/api, with its own
-    // src/.env) so it never collides with the public site's /api backend.
-    // See build.bat / the deploy layout.
-    return "/crm/api";
+    // Deployed on its own subdomain (https://jeweller-crm.node2begin.com) with
+    // the PHP endpoints at /api on the same origin — see DEPLOY.md.
+    return "/api";
   }
   if (typeof window !== "undefined") {
     return `http://${window.location.hostname}:8000/api`;

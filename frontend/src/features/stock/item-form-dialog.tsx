@@ -37,6 +37,7 @@ const BLANK = {
   huid: "",
   hsn_code: "",
   barcode: "",
+  reorder_level: "",
 };
 
 /**
@@ -96,6 +97,7 @@ export function ItemFormDialog({
         huid: item.huid ?? "",
         hsn_code: item.hsn_code ?? "",
         barcode: item.barcode ?? "",
+        reorder_level: Number(item.reorder_level) > 0 ? item.reorder_level : "",
       });
     } else {
       setForm(BLANK);
@@ -143,6 +145,7 @@ export function ItemFormDialog({
         huid: form.huid.trim() || null,
         hsn_code: form.hsn_code.trim() || null,
         barcode: form.barcode.trim() || null,
+        reorder_level: Number(form.reorder_level || 0),
       });
       toast.success(isEdit ? "Item saved." : "Item created.");
       void queryClient.invalidateQueries({ queryKey: ["stock"] });
@@ -268,6 +271,24 @@ export function ItemFormDialog({
           <p role="alert" className="rounded-input bg-attention-soft px-4 py-3 text-sm text-attention-strong">
             Net weight is more than gross weight. The metal cannot weigh more than the whole piece.
           </p>
+        ) : null}
+
+        {/* Only a pool can run low. A tagged piece is one of a kind — it is on
+            the shelf or it is sold — so the threshold is meaningless there. */}
+        {form.tracking === "bulk" ? (
+          <div className="sm:w-1/2 sm:pr-2.5">
+            <Label htmlFor="itf_reorder">Warn me when this metal falls below (g)</Label>
+            <Input
+              id="itf_reorder"
+              inputMode="decimal"
+              value={form.reorder_level}
+              onChange={(e) => set("reorder_level", e.target.value)}
+              placeholder="0.000"
+            />
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              The dashboard shows a low-stock warning once the pool drops to this weight. Leave blank for no warning.
+            </p>
+          </div>
         ) : null}
 
         <div className="grid gap-5 sm:grid-cols-2">

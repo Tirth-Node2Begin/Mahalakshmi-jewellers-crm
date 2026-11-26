@@ -36,7 +36,7 @@ final class InvoiceDraft
                 }
                 Database::execute(
                     'UPDATE invoices SET customer_id = :c, walkin_name = :wn, walkin_phone = :wp,
-                            invoice_date = :d, price_mode = :pm, discount_total = :disc, notes = :n
+                            invoice_date = :d, price_mode = :pm, bill_discount = :disc, notes = :n
                       WHERE id = :id',
                     [
                         'c' => $customerId,
@@ -60,7 +60,7 @@ final class InvoiceDraft
                     'invoice_date' => $billDate,
                     'price_mode' => $priceMode,
                     'status' => 'draft',
-                    'discount_total' => round((float) ($input['discount'] ?? 0), 2),
+                    'bill_discount' => round((float) ($input['discount'] ?? 0), 2),
                     'notes' => $input['notes'] ?? null,
                     'created_by' => $userId,
                 ]);
@@ -69,7 +69,9 @@ final class InvoiceDraft
             $totals = self::writeLines($invoiceId, $input['items'] ?? [], $billDate, $priceMode, $interState);
             $oldMetalValue = self::writeOldMetal($invoiceId, $input['old_metal'] ?? [], $billDate);
 
-            $discount = round((float) ($input['discount'] ?? 0), 2);
+            // the whole-bill figure the user typed PLUS every per-line discount
+            $billDiscount = round((float) ($input['discount'] ?? 0), 2);
+            $discount = round($billDiscount + $totals['discount'], 2);
             $beforeRounding = round(
                 $totals['metal'] + $totals['making'] - $discount + $totals['tax'] - $oldMetalValue,
                 2
@@ -78,11 +80,12 @@ final class InvoiceDraft
 
             Database::execute(
                 'UPDATE invoices SET subtotal = :sub, metal_total = :metal, making_total = :making,
-                        tax_total = :tax, cgst = :cgst, sgst = :sgst, igst = :igst,
+                        discount_total = :disc, tax_total = :tax, cgst = :cgst, sgst = :sgst, igst = :igst,
                         old_metal_value = :old, round_off = :ro, grand_total = :gt
                   WHERE id = :id',
                 [
                     'sub' => round($totals['metal'] + $totals['making'], 2),
+                    'disc' => $discount,
                     'metal' => $totals['metal'],
                     'making' => $totals['making'],
                     'tax' => $totals['tax'],
@@ -131,6 +134,7 @@ final class InvoiceDraft
     ): array {
         $metal = 0.0;
         $making = 0.0;
+        $lineDiscount = 0.0;
         $cgst = 0.0;
         $sgst = 0.0;
         $igst = 0.0;
@@ -216,6 +220,7 @@ final class InvoiceDraft
 
             $metal += $priced['metal_value'];
             $making += $priced['making_charge'];
+            $lineDiscount += $priced['discount'];
             $cgst += $priced['cgst'];
             $sgst += $priced['sgst'];
             $igst += $priced['igst'];
@@ -224,6 +229,7 @@ final class InvoiceDraft
         return [
             'metal' => round($metal, 2),
             'making' => round($making, 2),
+            'discount' => round($lineDiscount, 2),
             'cgst' => round($cgst, 2),
             'sgst' => round($sgst, 2),
             'igst' => round($igst, 2),

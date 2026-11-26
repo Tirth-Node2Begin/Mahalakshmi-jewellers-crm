@@ -40,6 +40,10 @@ interface Permission {
 const RESOURCE_LABEL: Record<string, string> = {
   dashboard: "Dashboard",
   reports: "Reports",
+  leads: "Leads",
+  hr: "Employees",
+  "hr.employees": "Employee directory",
+  "hr.payroll": "Payroll",
   customers: "Customers",
   invoices: "Billing",
   estimates: "Estimates",

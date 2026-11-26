@@ -2,10 +2,10 @@ import type { NextConfig } from "next";
 
 const isProd = process.env.NODE_ENV === "production";
 
-// The CRM is served under this obscure path on the website's domain (deploy its
-// build into website/public_html/gate-7q4k9x2z/). Keep in sync with BASE_PATH in
-// src/lib/auth.tsx. Everything (login, dashboard, assets, routes) sits below it.
-const basePath = "/gate-7q4k9x2z";
+// The CRM is served at the root of its own subdomain
+// (https://jeweller-crm.node2begin.com — deploy the build into that subdomain's
+// public_html/). Keep in sync with BASE_PATH in src/lib/auth.tsx.
+const basePath = "";
 
 const nextConfig: NextConfig = {
   // Static CSR export in prod only (dev keeps full routing) — planning/04 §1

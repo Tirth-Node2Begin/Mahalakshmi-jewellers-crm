@@ -140,17 +140,21 @@ export interface OrderItemsResponse {
 // ------------------------------------------------------------- payments module
 
 export interface PaymentRow {
+  id: number;
   receipt_no: string;
   amount: string;
   payment_date: string;
   payment_mode: PaymentMode;
   bank_name: string | null;
+  bank_account_id: number | null;
   cheque_number: string | null;
   cheque_status: ChequeStatus | null;
+  cheque_cleared_at: string | null;
   notes: string | null;
-  invoice_id: number;
-  invoice_no: string;
-  invoice_status: InvoiceStatus;
+  // null on an on-account receipt (an advance with no bill behind it)
+  invoice_id: number | null;
+  invoice_no: string | null;
+  invoice_status: InvoiceStatus | null;
   customer_name: string;
 }
 
@@ -165,6 +169,7 @@ export interface PaymentStats {
 export interface PaymentListResponse {
   payments: PaymentRow[];
   stats: PaymentStats;
+  bank_accounts: { id: number; account_name: string }[];
 }
 
 export interface OpenInvoiceOption {

@@ -10,7 +10,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { isValidEmail } from "@/shared/utils/validation";
-import { vendorsApi, type Vendor } from "./api";
+import { vendorsApi, type PartnerCategory, type Vendor } from "./api";
 import { VendorTypeSelect } from "./vendor-type-select";
 
 const defaultForm = {
@@ -39,10 +39,19 @@ export function VendorFormModal({
   open,
   onClose,
   vendor,
+  defaultType,
+  category,
+  noun = "supplier / maker",
 }: {
   open: boolean;
   onClose: () => void;
   vendor?: Vendor | null;
+  /** Type pre-selected when adding — the partner page passes its own kind. */
+  defaultType?: string;
+  /** Narrows the Type dropdown to one partner page's own types. */
+  category?: PartnerCategory;
+  /** Dialog wording: "supplier", "maker", "service" — matches the page's Add button. */
+  noun?: string;
 }) {
   const queryClient = useQueryClient();
   const isEdit = !!vendor;
@@ -74,9 +83,9 @@ export function VendorFormModal({
         notes: vendor.notes ?? "",
       });
     } else {
-      setForm({ ...defaultForm });
+      setForm({ ...defaultForm, vendor_type: defaultType ?? defaultForm.vendor_type });
     }
-  }, [open, vendor]);
+  }, [open, vendor, defaultType]);
 
   const set = (k: keyof typeof defaultForm, v: string) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -136,7 +145,7 @@ export function VendorFormModal({
     <Dialog
       open={open}
       onClose={onClose}
-      title={isEdit ? "Edit supplier / maker" : "Add supplier / maker"}
+      title={isEdit ? `Edit ${noun}` : `Add ${noun}`}
       maxWidth={720}
       footer={
         <>
@@ -157,7 +166,7 @@ export function VendorFormModal({
           </div>
           <div>
             <Label htmlFor="v_type">Type</Label>
-            <VendorTypeSelect id="v_type" value={form.vendor_type} onChange={(t) => set("vendor_type", t)} />
+            <VendorTypeSelect id="v_type" value={form.vendor_type} onChange={(t) => set("vendor_type", t)} category={category} />
           </div>
         </div>
 

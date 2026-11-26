@@ -1,7 +1,8 @@
 "use client";
 
 import { inventoryApi, type InventoryCategory, type InventoryItem, type Unit } from "@/features/inventory/api";
-import { PARTNER_CATEGORIES, PARTNER_CATEGORY_OF, vendorsApi } from "@/features/vendors/api";
+import { PARTNER_CATEGORIES, vendorsApi } from "@/features/vendors/api";
+import { useVendorTypes } from "@/features/vendors/vendor-type-select";
 import { ApiError } from "@/shared/api/api-error";
 import { Button } from "@/shared/ui/button";
 import { Collapsible } from "@/shared/ui/collapsible";
@@ -70,6 +71,7 @@ export function ItemModal({
     enabled: open,
   });
   const vendors = vendorData?.vendors ?? [];
+  const { categoryOf } = useVendorTypes();
 
   useEffect(() => {
     if (open) {
@@ -219,8 +221,10 @@ export function ItemModal({
           <Label htmlFor="it_vendor">Supplier {type === "raw_material" ? "(where this material came from)" : "/ Karigar"}</Label>
           <Select id="it_vendor" value={form.vendor_id} onChange={(e) => setForm((f) => ({ ...f, vendor_id: e.target.value }))}>
             <option value="">— none —</option>
+            {/* categoryOf knows where a shop-added type belongs, so those vendors
+                group with their own page instead of falling into a leftover bucket */}
             {PARTNER_CATEGORIES.map((cat) => {
-              const group = vendors.filter((v) => PARTNER_CATEGORY_OF[v.vendor_type] === cat.key);
+              const group = vendors.filter((v) => categoryOf(v.vendor_type) === cat.key);
               return group.length ? (
                 <optgroup key={cat.key} label={cat.label}>
                   {group.map((v) => (
@@ -229,16 +233,6 @@ export function ItemModal({
                 </optgroup>
               ) : null;
             })}
-            {/* shop-added types belong to no built-in category — don't lose those vendors */}
-            {vendors.some((v) => !PARTNER_CATEGORY_OF[v.vendor_type]) ? (
-              <optgroup label="Other">
-                {vendors
-                  .filter((v) => !PARTNER_CATEGORY_OF[v.vendor_type])
-                  .map((v) => (
-                    <option key={v.id} value={v.id}>{v.name}</option>
-                  ))}
-              </optgroup>
-            ) : null}
           </Select>
         </div>
         {type === "stock" ? (

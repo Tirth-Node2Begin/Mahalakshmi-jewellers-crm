@@ -15,11 +15,12 @@ export type BuiltInVendorType =
 /** Built-in or shop-added (vendor_types master) — resolve labels via useVendorTypes().labelOf. */
 export type VendorType = string;
 
-/** A type the shop added itself ("+ Add a new type…"). */
+/** A type the shop added itself ("+ Add a new type…"), on the page it was added from. */
 export interface CustomVendorType {
   id: number;
   slug: string;
   label: string;
+  category: PartnerCategory;
 }
 export type VendorStatus = "active" | "inactive" | "blacklisted";
 export type PartnerCategory = "supplier" | "maker" | "service";
@@ -131,7 +132,8 @@ export const vendorsApi = {
   toggle: (id: number) => api.post("vendors.php", { action: "toggle", id }),
   remove: (id: number) => api.post("vendors.php", { action: "delete", id }),
   listTypes: () => api.get<{ types: CustomVendorType[] }>("vendors.php", { view: "types" }),
-  addType: (label: string) => api.post<{ type: CustomVendorType }>("vendors.php", { action: "add_type", label }),
+  addType: (label: string, category: PartnerCategory) =>
+    api.post<{ type: CustomVendorType }>("vendors.php", { action: "add_type", label, category }),
 };
 
 export const VENDOR_TYPE_LABEL: Record<string, string> = {
@@ -167,6 +169,49 @@ export const PARTNER_CATEGORIES: { key: PartnerCategory; label: string; types: B
   { key: "maker", label: "Jewellery Makers", types: ["karigar", "manufacturer"] },
   { key: "service", label: "Services", types: ["hallmark", "cad", "service", "other"] },
 ];
+
+/**
+ * Category for a BUILT-IN type. A shop-added type carries its own category in
+ * the vendor_types master, so prefer `useVendorTypes().categoryOf` — this
+ * fallback only keeps an unknown type reachable from the Services page.
+ */
+export function partnerCategoryOf(type: string): PartnerCategory {
+  return PARTNER_CATEGORY_OF[type] ?? "service";
+}
+
+/** The three partner pages: route, wording and the type an "Add" starts from. */
+export const PARTNER_PAGES: Record<
+  PartnerCategory,
+  { href: string; label: string; noun: string; addLabel: string; defaultType: BuiltInVendorType; emptyTitle: string; emptyHint: string }
+> = {
+  supplier: {
+    href: "/vendors",
+    label: "Material Suppliers",
+    noun: "supplier",
+    addLabel: "Add supplier",
+    defaultType: "bullion",
+    emptyTitle: "No suppliers yet",
+    emptyHint: "Add the people you buy gold, diamonds, stones or packing material from.",
+  },
+  maker: {
+    href: "/vendors/makers",
+    label: "Jewellery Makers",
+    noun: "maker",
+    addLabel: "Add maker",
+    defaultType: "karigar",
+    emptyTitle: "No jewellery makers yet",
+    emptyHint: "Add your karigars and workshops so you can track their work and payments.",
+  },
+  service: {
+    href: "/vendors/services",
+    label: "Services & Others",
+    noun: "service",
+    addLabel: "Add service",
+    defaultType: "service",
+    emptyTitle: "No services yet",
+    emptyHint: "Add hallmark centres, couriers, designers and other people you work with.",
+  },
+};
 
 export function vendorStatusTone(status: VendorStatus): "green" | "gray" | "coral" {
   return status === "active" ? "green" : status === "blacklisted" ? "coral" : "gray";

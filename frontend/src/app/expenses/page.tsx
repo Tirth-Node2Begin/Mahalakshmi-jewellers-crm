@@ -13,10 +13,11 @@ import { Select } from "@/shared/ui/select";
 import { SkeletonRows } from "@/shared/ui/skeleton";
 import { formatCurrency, formatDate, localDateString, addDaysStr } from "@/shared/utils/format";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarCheck, ChartPie, ChevronLeft, ChevronRight, Layers, Pencil, Plus, Trash2, Wallet } from "lucide-react";
+import { ChevronLeft, ChevronRight, Layers, Pencil, Plus, Search, Trash2, Wallet } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { invalidateMoneyQueries } from "@/shared/api/invalidate-money";
 
 export default function ExpensesPage() {
   const { can } = usePermissions();
@@ -52,11 +53,14 @@ export default function ExpensesPage() {
 
   const dayTotal = filtered.reduce((sum, e) => sum + Number(e.amount), 0);
 
+  const filtersActive = showAll || typeFilter !== "" || search !== "" || day !== localDateString();
+
   const remove = async (id: number) => {
     try {
       await expensesApi.remove(id);
       toast.success("Expense deleted.");
       void queryClient.invalidateQueries({ queryKey: ["expenses"] });
+      invalidateMoneyQueries(queryClient);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Cannot delete.");
     }
@@ -82,47 +86,66 @@ export default function ExpensesPage() {
         <KpiCard icon={Layers} label="Variable" value={kpis ? formatCurrency(kpis.variable_total) : "—"} tone="green" onClick={() => setTypeFilter(typeFilter === "variable" ? "" : "variable")} active={typeFilter === "variable"} />
       </div>
 
-      <Card className="p-0">
-        <div className="flex flex-wrap items-center gap-3 border-b border-border p-4">
-          {!showAll ? (
-            <div className="flex items-center gap-1">
-              <Button variant="ghost" size="iconSm" onClick={() => shiftDay(-1)} aria-label="Previous day">
-                <ChevronLeft className="h-4 w-4" aria-hidden />
-              </Button>
-              <Input type="date" value={day} onChange={(e) => setDay(e.target.value)} className="h-10 w-40" />
-              <Button variant="ghost" size="iconSm" onClick={() => shiftDay(1)} aria-label="Next day">
-                <ChevronRight className="h-4 w-4" aria-hidden />
-              </Button>
-            </div>
-          ) : null}
-          <Button variant={showAll ? "primary" : "secondary"} size="sm" onClick={() => setShowAll((s) => !s)}>
-            {showAll ? "Show by day" : "Show all"}
+      {/* primary action sits above the list, clear of the filter controls */}
+      <PermissionGate permission="expenses.create">
+        <div className="flex justify-end">
+          <Button onClick={() => { setEditing(null); setModalOpen(true); }}>
+            <Plus className="h-4 w-4" aria-hidden /> Add
           </Button>
-          <Input placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} className="h-10 w-full max-w-xs" />
-          <Select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="h-10 w-auto">
-            <option value="">All types</option>
-            <option value="fixed">Fixed</option>
-            <option value="variable">Variable</option>
-          </Select>
-          <Button variant="ghost" size="sm" onClick={resetFilters}>
-            Reset
-          </Button>
+        </div>
+      </PermissionGate>
 
-          <div className="ml-auto flex items-center gap-3">
-            <span className="text-sm font-semibold text-foreground tabular-nums">{formatCurrency(dayTotal)}</span>
-            {/* rent/salary-style recurring costs live in their own tracker — give
-                them a road from here, not only from the sidebar */}
-            <Link href="/expenses/monthly" className="text-sm font-medium text-primary-strong hover:underline">
-              <CalendarCheck className="mr-1 inline h-4 w-4" aria-hidden /> Fixed costs
-            </Link>
-            <Link href="/expenses/insights" className="text-sm font-medium text-primary-strong hover:underline">
-              <ChartPie className="mr-1 inline h-4 w-4" aria-hidden /> Insights
-            </Link>
-            <PermissionGate permission="expenses.create">
-              <Button size="sm" onClick={() => { setEditing(null); setModalOpen(true); }}>
-                <Plus className="h-4 w-4" aria-hidden /> Add
+      <Card className="p-0">
+        {/* search anchors the left; the filters group on the right, all on one 40px baseline */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border p-4">
+          <div className="flex min-w-0 flex-1 items-center gap-4">
+            <div className="relative w-full max-w-xs">
+              <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+              <Input
+                placeholder="Search expenses…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="h-10 pl-10"
+                aria-label="Search expenses"
+              />
+            </div>
+            <div className="hidden flex-col leading-tight sm:flex">
+              <span className="text-[11px] font-medium uppercase tracking-[0.4px] text-muted-foreground">
+                {showAll ? "Total" : "Day total"}
+              </span>
+              <span className="text-sm font-semibold text-foreground tabular-nums">{formatCurrency(dayTotal)}</span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            {!showAll ? (
+              <div className="flex items-center gap-1">
+                <Button variant="secondary" size="icon" onClick={() => shiftDay(-1)} aria-label="Previous day">
+                  <ChevronLeft className="h-4 w-4" aria-hidden />
+                </Button>
+                <Input type="date" value={day} onChange={(e) => setDay(e.target.value)} className="h-10 w-[9.5rem] text-center" aria-label="Expense date" />
+                <Button variant="secondary" size="icon" onClick={() => shiftDay(1)} aria-label="Next day">
+                  <ChevronRight className="h-4 w-4" aria-hidden />
+                </Button>
+              </div>
+            ) : null}
+
+            <Button variant={showAll ? "primary" : "secondary"} onClick={() => setShowAll((s) => !s)}>
+              {showAll ? "Show by day" : "Show all"}
+            </Button>
+
+            <Select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="h-10 w-auto" aria-label="Expense type">
+              <option value="">All types</option>
+              <option value="fixed">Fixed</option>
+              <option value="variable">Variable</option>
+            </Select>
+
+            {/* only offer Reset once something is actually filtered */}
+            {filtersActive ? (
+              <Button variant="ghost" onClick={resetFilters}>
+                Reset
               </Button>
-            </PermissionGate>
+            ) : null}
           </div>
         </div>
 

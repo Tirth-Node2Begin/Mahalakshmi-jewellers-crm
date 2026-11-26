@@ -29,6 +29,12 @@ $user = requireApiAuth();
 $gstVisibleOnly = GstVisibility::restrictedUsername($user->username);
 $canSeeCost = checkPermission('reports.stock') || checkPermission('accounting.read');
 
+function positiveQueryInt(string $key, int $default, int $min, int $max): int
+{
+    $value = (int) ($_GET[$key] ?? $default);
+    return max($min, min($max, $value));
+}
+
 if (Request::method() === 'GET') {
     requirePermission('inventory.read');
     $view = (string) ($_GET['view'] ?? 'items');
@@ -75,17 +81,12 @@ if (Request::method() === 'GET') {
     }
 
     // default: item list
-    $sql = "SELECT i.id, i.item_code, i.name, i.metal, i.tracking, i.status, i.huid, i.barcode,
-                   i.gross_weight, i.net_weight, i.stone_weight, i.making_type, i.making_value,
-                   i.hsn_code, i.current_stock, i.is_active,
-                   p.code AS purity_code, c.name AS category_name"
-        . ($canSeeCost ? ', i.avg_cost' : '') . "
-              FROM inventory_items i
-         LEFT JOIN purities p ON p.id = i.purity_id
-         LEFT JOIN inventory_categories c ON c.id = i.category_id
-             WHERE i.is_active = 1";
-    $params = [];
+    $page = positiveQueryInt('page', 1, 1, 1000000);
+    $perPage = positiveQueryInt('per_page', 300, 1, 500);
+    $offset = ($page - 1) * $perPage;
 
+    $where = ['i.is_active = 1'];
+    $params = [];
     foreach ([
         'metal' => 'i.metal = :metal',
         'purity_id' => 'i.purity_id = :purity_id',
@@ -94,19 +95,38 @@ if (Request::method() === 'GET') {
         'status' => 'i.status = :status',
     ] as $key => $clause) {
         if (!empty($_GET[$key])) {
-            $sql .= " AND {$clause}";
+            $where[] = $clause;
             $params[$key] = $_GET[$key];
         }
     }
     if (!empty($_GET['search'])) {
-        $sql .= ' AND (i.item_code LIKE :q1 OR i.name LIKE :q2 OR i.huid LIKE :q3 OR i.barcode LIKE :q4)';
-        $like = '%' . $_GET['search'] . '%';
+        $where[] = '(i.item_code LIKE :q1 OR i.name LIKE :q2 OR i.huid LIKE :q3 OR i.barcode LIKE :q4)';
+        $like = '%' . trim((string) $_GET['search']) . '%';
         $params += ['q1' => $like, 'q2' => $like, 'q3' => $like, 'q4' => $like];
     }
-    $sql .= ' ORDER BY i.item_code DESC LIMIT 300';
+
+    $whereSql = implode(' AND ', $where);
+    $total = (int) Database::fetchValue("SELECT COUNT(*) FROM inventory_items i WHERE {$whereSql}", $params);
+
+    $sql = "SELECT i.id, i.item_code, i.name, i.metal, i.tracking, i.status, i.huid, i.barcode,
+                   i.gross_weight, i.net_weight, i.stone_weight, i.making_type, i.making_value,
+                   i.hsn_code, i.current_stock, i.reorder_level, i.is_active,
+                   p.code AS purity_code, c.name AS category_name"
+        . ($canSeeCost ? ', i.avg_cost' : '') . "
+              FROM inventory_items i
+         LEFT JOIN purities p ON p.id = i.purity_id
+         LEFT JOIN inventory_categories c ON c.id = i.category_id
+             WHERE {$whereSql}
+             ORDER BY i.item_code DESC LIMIT {$perPage} OFFSET {$offset}";
 
     Response::success([
         'items' => Database::fetchAll($sql, $params),
+        'pagination' => [
+            'page' => $page,
+            'per_page' => $perPage,
+            'total' => $total,
+            'total_pages' => max(1, (int) ceil($total / $perPage)),
+        ],
         'purities' => RateService::purities(),
         'categories' => Database::fetchAll(
             'SELECT id, name, item_type FROM inventory_categories WHERE is_active = 1 ORDER BY name'
@@ -135,6 +155,7 @@ switch ($action) {
             'huid' => 'nullable|string|max:10',
             'hsn_code' => 'nullable|string|max:10',
             'barcode' => 'nullable|string|max:40',
+            'reorder_level' => 'nullable|numeric|min:0',
         ]);
 
         $gross = (float) ($data['gross_weight'] ?? 0);
@@ -159,6 +180,9 @@ switch ($action) {
             'huid' => $data['huid'] ?: null,
             'hsn_code' => $data['hsn_code'] ?: '7113',
             'barcode' => $data['barcode'] ?: null,
+            // only a metal pool can run low — a tagged piece is one of a kind,
+            // so it is either on the shelf or sold, never "below its level"
+            'reorder_level' => $data['tracking'] === 'bulk' ? round((float) ($data['reorder_level'] ?? 0), 3) : 0,
         ];
 
         if (!empty($data['id'])) {
@@ -167,7 +191,8 @@ switch ($action) {
                 'UPDATE inventory_items SET name = :name, metal = :metal, purity_id = :purity_id,
                         tracking = :tracking, category_id = :category_id, gross_weight = :gross_weight,
                         net_weight = :net_weight, stone_weight = :stone_weight, making_type = :making_type,
-                        making_value = :making_value, huid = :huid, hsn_code = :hsn_code, barcode = :barcode
+                        making_value = :making_value, huid = :huid, hsn_code = :hsn_code, barcode = :barcode,
+                        reorder_level = :reorder_level
                   WHERE id = :id',
                 $fields + ['id' => $id]
             );
@@ -209,11 +234,31 @@ switch ($action) {
 
         Database::transaction(static function () use ($itemId, $direction, $qty, $weight, $data, $user): void {
             $item = Database::fetchOne(
-                'SELECT id, item_code, metal, tracking, status FROM inventory_items WHERE id = :id FOR UPDATE',
+                'SELECT id, item_code, item_type, metal, tracking, status
+                   FROM inventory_items WHERE id = :id FOR UPDATE',
                 ['id' => $itemId]
             );
             if ($item === null) {
                 throw new RuntimeException('Item not found.');
+            }
+
+            // A tagged piece is ONE physical item, so it can never hold a pile of
+            // pieces. Letting an adjustment add qty 6 to a tagged piece left the
+            // ledger saying six were on the shelf while the piece itself was sold,
+            // and carried phantom stock value in the books.
+            if ($item['tracking'] === 'tagged') {
+                if ($direction === 'in') {
+                    throw new DomainException(
+                        'A tagged piece cannot be added by adjustment — record it as opening stock or a purchase.'
+                    );
+                }
+                $available = StockService::availability($itemId);
+                if ($available['weight'] <= 0.0005) {
+                    throw new DomainException('That piece is not in stock.');
+                }
+                // written off whole, never in slices
+                $qty = 1.0;
+                $weight = $available['weight'];
             }
 
             $currentCostPerGram = StockService::avgCostPerGram($itemId);
@@ -240,9 +285,7 @@ switch ($action) {
             // value the correction so the books follow the stock
             $voucherId = null;
             if ($value > 0.005) {
-                $inventoryLedger = $item['metal'] !== null
-                    ? Ledgers::system('inventory', (string) $item['metal'])
-                    : Ledgers::system('old_metal');
+                $inventoryLedger = Ledgers::inventoryForItem($item['item_type'], $item['metal']);
                 $lossLedger = Ledgers::system('stock_adjust');
 
                 $voucherId = VoucherService::post(
@@ -302,13 +345,22 @@ switch ($action) {
         $value = (float) $data['value'];
 
         Database::transaction(static function () use ($itemId, $data, $weight, $value, $user): void {
-            $item = Database::fetchOne('SELECT id, metal FROM inventory_items WHERE id = :id', ['id' => $itemId]);
+            $item = Database::fetchOne(
+                'SELECT id, item_type, metal, tracking FROM inventory_items WHERE id = :id',
+                ['id' => $itemId]
+            );
             if ($item === null) {
                 throw new RuntimeException('Item not found.');
             }
-            $inventoryLedger = $item['metal'] !== null
-                ? Ledgers::system('inventory', (string) $item['metal'])
-                : Ledgers::system('old_metal');
+            $openingQty = (float) ($data['qty'] ?? 1);
+            if ($item['tracking'] === 'tagged') {
+                $openingQty = 1.0;   // one piece, whatever was typed
+                $already = StockService::availability($itemId);
+                if ($already['qty'] > 0.0005 || $already['weight'] > 0.0005) {
+                    throw new DomainException('That piece is already in stock.');
+                }
+            }
+            $inventoryLedger = Ledgers::inventoryForItem($item['item_type'], $item['metal']);
 
             $voucherId = VoucherService::post(
                 vtype: 'opening',
@@ -327,7 +379,7 @@ switch ($action) {
                 itemId: $itemId,
                 direction: 'in',
                 reason: 'opening',
-                qty: (float) ($data['qty'] ?? 1),
+                qty: $openingQty,
                 weight: $weight,
                 value: $value,
                 ratePerGram: $weight > 0 ? round($value / $weight, 2) : null,

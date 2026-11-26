@@ -2,6 +2,7 @@
 
 import { usePermissions } from "@/lib/permissions";
 import {
+  PARTNER_PAGES,
   vendorsApi,
   vendorStatusTone,
   type VendorPaymentRow,
@@ -50,7 +51,7 @@ function DetailInner() {
   const params = useSearchParams();
   const id = Number(params.get("id"));
   const { can } = usePermissions();
-  const { labelOf } = useVendorTypes();
+  const { labelOf, categoryOf } = useVendorTypes();
   const [editOpen, setEditOpen] = useState(false);
   const [tab, setTab] = useState<VendorTab>("overview");
   const [payOpen, setPayOpen] = useState(false);
@@ -89,9 +90,9 @@ function DetailInner() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-4">
         <Link
-          href="/vendors"
+          href={PARTNER_PAGES[categoryOf(vendor.vendor_type)].href}
           className="flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground hover:bg-card hover:shadow-card"
-          aria-label="Back to vendors"
+          aria-label={`Back to ${PARTNER_PAGES[categoryOf(vendor.vendor_type)].label.toLowerCase()}`}
         >
           <ArrowLeft className="h-5 w-5" aria-hidden />
         </Link>

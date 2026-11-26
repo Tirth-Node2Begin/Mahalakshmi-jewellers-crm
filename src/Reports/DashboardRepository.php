@@ -331,7 +331,7 @@ final class DashboardRepository
         return Database::fetchAll(
             "SELECT id, item_code, name, item_type, metal, current_stock, reorder_level, avg_cost,
                     (SELECT short_name FROM units u WHERE u.id = i.unit_id) AS unit
-             FROM inventory_items i WHERE is_active = 1 AND reorder_level > 0 AND current_stock <= reorder_level ORDER BY current_stock LIMIT 8"
+             FROM inventory_items i WHERE " . self::LOW_STOCK . ' ORDER BY current_stock LIMIT 8'
         );
     }
 
@@ -386,17 +386,41 @@ final class DashboardRepository
 
     // -------------------------------------------------------------- count helpers
 
+    /**
+     * How long a bill may stay unpaid before the dashboard calls it overdue.
+     * Counter sales are settled on the spot; credit given at the counter has no
+     * formal due date, so the shop sets the grace period it works to.
+     */
+    private static function creditDays(): int
+    {
+        $days = (int) (Database::fetchValue("SELECT svalue FROM settings WHERE skey = 'invoice_credit_days'") ?? 7);
+        return max(0, $days);
+    }
+
+    /**
+     * Unpaid finalised bills that are past their date.
+     *
+     * A bill carries a due_date only if one was entered, and the jewellery
+     * billing flow never asks for one — keying off it alone made this count
+     * permanently zero however much money was outstanding. The bill's own age
+     * is the fallback, so credit given at the counter still surfaces here.
+     */
     private static function countOverdueInvoices(bool $gstVisibleOnly = false): int
     {
+        $late = 'COALESCE(due_date, DATE_ADD(invoice_date, INTERVAL :days DAY)) < CURDATE()';
+        $params = ['days' => self::creditDays()];
+
         if ($gstVisibleOnly) {
             $outstandingSql = self::invoiceOutstandingSql('invoices');
             return (int) Database::fetchValue(
-                "SELECT COUNT(*) FROM invoices WHERE status = 'final' AND due_date IS NOT NULL AND due_date < CURDATE() AND {$outstandingSql} > 0.01"
+                "SELECT COUNT(*) FROM invoices WHERE status = 'final' AND {$late} AND {$outstandingSql} > 0.01",
+                $params
             );
         }
 
         return (int) Database::fetchValue(
-            'SELECT COUNT(*) FROM invoices WHERE ' . self::UNSETTLED . ' AND due_date IS NOT NULL AND due_date < CURDATE()'
+            'SELECT COUNT(*) FROM invoices WHERE ' . self::UNSETTLED . ' AND ' . $late,
+            $params
         );
     }
 
@@ -410,9 +434,16 @@ final class DashboardRepository
         return (int) Database::fetchValue("SELECT COUNT(*) FROM invoices WHERE status = 'draft'{$visibilitySql}");
     }
 
+    /**
+     * Running low means a metal POOL is nearly empty and needs buying in. A
+     * tagged piece is one of a kind — it is either on the shelf or sold, never
+     * "low" — so counting those made this alert meaningless.
+     */
+    private const LOW_STOCK = "is_active = 1 AND tracking = 'bulk' AND reorder_level > 0 AND current_stock <= reorder_level";
+
     private static function countLowStock(): int
     {
-        return (int) Database::fetchValue('SELECT COUNT(*) FROM inventory_items WHERE is_active = 1 AND reorder_level > 0 AND current_stock <= reorder_level');
+        return (int) Database::fetchValue('SELECT COUNT(*) FROM inventory_items WHERE ' . self::LOW_STOCK);
     }
 
     /** Active items holding stock with no movement in the last 90 days (frozen capital). */

@@ -85,6 +85,7 @@ export interface InvoiceListRow {
 
 export interface InvoiceListResponse {
   invoices: InvoiceListRow[];
+  can_non_gst_billing: boolean;
   rates_set_today: boolean;
   purities: Purity[];
   categories: ItemCategory[];
@@ -174,7 +175,10 @@ export interface InvoiceDetail {
   subtotal: Num;
   metal_total: Num;
   making_total: Num;
+  /** total discount on the bill: the whole-bill figure plus every line discount */
   discount_total: Num;
+  /** the whole-bill figure alone, as typed in the totals panel */
+  bill_discount: Num;
   tax_total: Num;
   cgst: Num;
   sgst: Num;
@@ -249,7 +253,10 @@ export interface EstimateDetail {
   price_mode: PriceMode;
   metal_total: Num;
   making_total: Num;
+  /** total discount: the whole-estimate figure plus every line discount */
   discount_total: Num;
+  /** the whole-estimate figure alone */
+  bill_discount: Num;
   tax_estimate: Num;
   grand_total: Num;
   status: EstimateStatus;

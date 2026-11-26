@@ -42,10 +42,28 @@ $catalog = [
         'delete' => 'Remove a customer',
         'ledger' => "See a customer's account statement",
     ],
+    'leads' => [
+        'read' => 'See leads',
+        'create' => 'Add a lead',
+        'update' => 'Edit a lead',
+        'delete' => 'Remove a lead',
+    ],
+    'hr' => [
+        'read' => 'See employee directory',
+    ],
+    'hr.employees' => [
+        'manage' => 'Add and edit employees',
+    ],
+    'hr.payroll' => [
+        'read' => 'See payroll',
+        'manage' => 'Create and finalize payroll',
+        'pay' => 'Pay and reverse salaries',
+    ],
     'invoices' => [
         'read' => 'See bills',
         'create' => 'Make a bill',
         'override' => 'Change rate, making or tax on a bill',
+        'non_gst' => 'Make and see Non GST bills in billing only',
         'cancel' => 'Cancel a bill',
     ],
     'estimates' => [
@@ -80,6 +98,9 @@ $catalog = [
     'rates' => [
         'read' => "See today's rates",
         'set' => "Set today's gold & silver rates",
+        // separate from 'set': a shop can let someone watch the daily feed
+        // without giving them the power to change what the counter bills at
+        'feed' => 'See auto-fetched rates awaiting approval',
     ],
     'vendors' => [
         'read' => 'See vendors',
@@ -136,8 +157,10 @@ $roles = [
             // accountant to see it too.
             'reports.read', 'reports.accounting', 'reports.gst',
             'reports.outstanding', 'reports.stock',
+            'leads.read', 'leads.create', 'leads.update',
             'customers.read', 'customers.create', 'customers.update', 'customers.ledger',
             'vendors.read', 'vendors.manage', 'vendors.ledger',
+            'hr.payroll.read', 'hr.payroll.pay',
             'invoices.read', 'invoices.create', 'invoices.override', 'invoices.cancel',
             'estimates.read', 'estimates.create',
             'payments.read', 'payments.create', 'payments.vendor', 'payments.cancel',
@@ -148,11 +171,30 @@ $roles = [
             'inventory.read', 'rates.read',
         ],
     ],
+    'non_gst_billing' => [
+        'display' => 'Non GST Billing Access', 'scope' => 'all', 'system' => 0,
+        'grants' => [
+            // Add-on role: assign it together with Accountant/Cashier when the
+            // owner wants that login to make and see Non GST bills.
+            'invoices.non_gst',
+        ],
+    ],
+    'hr' => [
+        'display' => 'HR Manager', 'scope' => 'all', 'system' => 0,
+        'grants' => [
+            'dashboard.read',
+            'reports.read',
+            'users.read',
+            'hr.read', 'hr.employees.manage',
+            'hr.payroll.read', 'hr.payroll.manage', 'hr.payroll.pay',
+        ],
+    ],
     'cashier' => [
         // counter staff: bill and take money. No P&L, no cost values, no overrides.
         'display' => 'Cashier', 'scope' => 'all', 'system' => 0,
         'grants' => [
             'dashboard.read',
+            'leads.read', 'leads.create', 'leads.update',
             'customers.read', 'customers.create',
             'invoices.read', 'invoices.create',
             'estimates.read', 'estimates.create',
@@ -165,7 +207,7 @@ $roles = [
         'grants' => [
             'dashboard.read',
             'inventory.read', 'inventory.manage', 'inventory.adjust', 'inventory.issue', 'inventory.opening',
-            'rates.read', 'rates.set',
+            'rates.read', 'rates.set', 'rates.feed',
             'vendors.read',
             'purchases.read', 'purchases.create',
             'reports.read', 'reports.stock',
@@ -335,7 +377,8 @@ $ledger = static function (
 };
 
 $ledger($gCashBank,   'Cash in Hand',            'cash');
-$ledger($gCashBank,   'Bank Account',            'bank');
+$ledger($gCashBank,   'Bank Account',            'bank');          // catch-all when no account is chosen
+$ledger($gCashBank,   'Cheques in Hand',         'cheques_in_hand'); // received, not yet cleared
 $ledger($gInventory,  'Inventory — Gold',        'inventory', 'gold');
 $ledger($gInventory,  'Inventory — Silver',      'inventory', 'silver');
 $ledger($gInventory,  'Inventory — Platinum',    'inventory', 'platinum');
@@ -440,6 +483,21 @@ $settings = [
     'invoice_terms' => 'Goods once sold will not be taken back or exchanged.',
     'invoice_footer_note' => 'Thank you for your visit!',
     'currency' => 'INR',
+
+    // Daily rate feed (api/cron/fetch_rates.php). Fetched rates are STAGED for
+    // approval, never written straight into metal_rates — see the migration
+    // 2026_08_04_rate_feed.sql for why.
+    'rate_feed_enabled' => '1',
+    'rate_feed_sources' => 'ibja',
+    'rate_feed_max_move_pct' => '8',   // a bigger day-over-day jump gets flagged
+    // CBIC's fortnightly customs tariff value — the government cross-check.
+    // Optional: paste the two USD figures from the latest notification and the
+    // day it takes effect, and the check switches itself on.
+    'rate_feed_cbic_gold_usd_10g' => '',
+    'rate_feed_cbic_silver_usd_kg' => '',
+    'rate_feed_cbic_notification' => '',
+    'rate_feed_cbic_effective_from' => '',
+    'rate_feed_usd_inr' => '',
 ];
 foreach ($settings as $key => $value) {
     Database::execute(

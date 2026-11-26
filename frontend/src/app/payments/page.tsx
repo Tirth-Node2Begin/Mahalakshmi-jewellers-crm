@@ -1,7 +1,9 @@
 "use client";
 
 import { RecordPaymentModal } from "@/features/invoices/record-payment-modal";
-import { invoicesApi, paymentModeLabel, paymentsApi } from "@/features/invoices/api";
+import { billingApi, useCompanySettings } from "@/features/billing/api";
+import { paymentModeLabel, paymentsApi } from "@/features/invoices/api";
+import type { PaymentRow } from "@/features/invoices/types";
 import { printPaymentReceipt } from "@/app/invoices/detail/payment-receipt";
 import { PermissionGate } from "@/lib/permissions";
 import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
@@ -11,16 +13,18 @@ import { Card } from "@/shared/ui/card";
 import { Dialog } from "@/shared/ui/dialog";
 import { EmptyState } from "@/shared/ui/empty-state";
 import { Input, Label } from "@/shared/ui/input";
+import { Textarea } from "@/shared/ui/textarea";
 import { KpiCard } from "@/shared/ui/kpi-card";
 import { Pagination, usePagination } from "@/shared/ui/pagination";
 import { Select } from "@/shared/ui/select";
 import { SkeletonRows } from "@/shared/ui/skeleton";
 import { formatCurrency, formatDate } from "@/shared/utils/format";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, IndianRupee, Plus, Printer, Receipt, Wallet } from "lucide-react";
+import { AlertCircle, BanknoteArrowDown, Check, IndianRupee, Plus, Printer, Receipt, Wallet } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { toast } from "sonner";
+import { invalidateMoneyQueries } from "@/shared/api/invalidate-money";
 
 const MODE_OPTIONS = [
   { value: "", label: "All modes" },
@@ -53,6 +57,7 @@ export default function PaymentsPage() {
 
   const payments = data?.payments ?? [];
   const stats = data?.stats;
+  const bankAccounts = data?.bank_accounts ?? [];
   const { page, totalPages, pageItems, setPage } = usePagination(payments, 15, [search, mode]);
 
   // "record payment" flow: pick an open bill, then hand it to the existing RecordPaymentModal
@@ -80,6 +85,7 @@ export default function PaymentsPage() {
     setPickedInvoiceId("");
     void queryClient.invalidateQueries({ queryKey: ["payments"] });
     void queryClient.invalidateQueries({ queryKey: ["invoices"] });
+    invalidateMoneyQueries(queryClient);
   };
 
   const resetFilters = () => {
@@ -87,16 +93,60 @@ export default function PaymentsPage() {
     setMode("");
   };
 
-  // the payments list doesn't carry the full bill/company — fetch the bill and print the receipt
-  const printReceipt = async (invoiceId: number, receiptNo: string) => {
+  // a received cheque sits in Cheques in Hand until the bank confirms it, so the
+  // bank balance stays honest. These two actions are what move it on.
+  const [chequeTarget, setChequeTarget] = useState<PaymentRow | null>(null);
+  const [chequeAction, setChequeAction] = useState<"clear" | "bounce">("clear");
+  const [chequeBank, setChequeBank] = useState("");
+  const [clearedOn, setClearedOn] = useState(() => new Date().toISOString().slice(0, 10));
+  const [bounceReason, setBounceReason] = useState("");
+  const [chequeSaving, setChequeSaving] = useState(false);
+
+  const openChequeDialog = (payment: PaymentRow, action: "clear" | "bounce") => {
+    setChequeTarget(payment);
+    setChequeAction(action);
+    setChequeBank(payment.bank_account_id ? String(payment.bank_account_id) : "");
+    setClearedOn(new Date().toISOString().slice(0, 10));
+    setBounceReason("");
+  };
+
+  const submitCheque = async () => {
+    if (!chequeTarget) return;
+    if (chequeAction === "bounce" && bounceReason.trim() === "") {
+      toast.error("Please say what the bank said.");
+      return;
+    }
+    setChequeSaving(true);
     try {
-      const detail = await invoicesApi.detail(invoiceId);
-      const payment = detail.payments.find((pp) => pp.receipt_no === receiptNo);
-      if (!payment) {
-        toast.error("Receipt not found.");
-        return;
+      if (chequeAction === "clear") {
+        await paymentsApi.clearCheque({
+          id: chequeTarget.id,
+          bank_account_id: chequeBank ? Number(chequeBank) : null,
+          cleared_on: clearedOn,
+        });
+        toast.success("Cheque marked cleared.");
+      } else {
+        await paymentsApi.bounceCheque({ id: chequeTarget.id, reason: bounceReason.trim() });
+        toast.success("Cheque marked bounced — the bill is due again.");
       }
-      printPaymentReceipt({ payment, invoice: detail.invoice, company: detail.company });
+      setChequeTarget(null);
+      void queryClient.invalidateQueries({ queryKey: ["payments"] });
+      void queryClient.invalidateQueries({ queryKey: ["invoices"] });
+      invalidateMoneyQueries(queryClient);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not update the cheque.");
+    } finally {
+      setChequeSaving(false);
+    }
+  };
+
+  // the payments list doesn't carry the full bill/company — fetch the bill and print the receipt
+  const company = useCompanySettings();
+  const printReceipt = async (payment: PaymentRow) => {
+    try {
+      // an on-account receipt has no bill, so there are no bill totals to show
+      const bill = payment.invoice_id ? (await billingApi.detail(payment.invoice_id)).invoice : null;
+      printPaymentReceipt({ payment, bill, company });
     } catch {
       toast.error("Could not open the receipt.");
     }
@@ -156,27 +206,45 @@ export default function PaymentsPage() {
             </div>
             {pageItems.map((p) => (
               <div
-                key={p.receipt_no}
+                key={p.id}
                 className="grid grid-cols-2 gap-4 border-b border-border/60 px-4 py-4 last:border-0 md:grid-cols-[0.9fr_1fr_1.2fr_1fr_1fr_1.2fr_0.9fr] md:items-center"
               >
                 <span className="text-sm text-muted-foreground">{formatDate(p.payment_date)}</span>
                 <button
-                  onClick={() => void printReceipt(p.invoice_id, p.receipt_no)}
+                  onClick={() => void printReceipt(p)}
                   className="text-left font-mono text-sm font-medium text-primary-strong hover:underline"
                   title="View / print receipt"
                 >
                   {p.receipt_no}
                 </button>
                 <span className="truncate text-sm text-foreground">{p.customer_name}</span>
-                <Link href={`/invoices/detail?id=${p.invoice_id}`} className="truncate text-sm font-medium text-primary-strong hover:underline">
-                  {p.invoice_no}
-                </Link>
+                {p.invoice_id ? (
+                  <Link href={`/invoices/detail?id=${p.invoice_id}`} className="truncate text-sm font-medium text-primary-strong hover:underline">
+                    {p.invoice_no}
+                  </Link>
+                ) : (
+                  <span className="text-sm text-muted-foreground">On account</span>
+                )}
                 <span className="text-sm text-foreground">{paymentModeLabel(p.payment_mode)}</span>
                 <span className="text-sm text-muted-foreground">
                   {p.payment_mode === "cheque" ? (
                     <span className="flex flex-wrap items-center gap-2">
                       {p.cheque_number ? <span className="font-mono text-xs">{p.cheque_number}</span> : null}
                       {p.cheque_status ? <Badge tone={chequeStatusTone(p.cheque_status)}>{p.cheque_status}</Badge> : null}
+                      {p.cheque_status === "cleared" ? (
+                        <span className="text-xs text-muted-foreground">{p.bank_name ?? ""}</span>
+                      ) : p.cheque_status !== "bounced" ? (
+                        <PermissionGate permission="payments.create">
+                          <span className="flex items-center gap-1">
+                            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => openChequeDialog(p, "clear")}>
+                              <Check className="h-3.5 w-3.5" aria-hidden /> Cleared
+                            </Button>
+                            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => openChequeDialog(p, "bounce")}>
+                              <BanknoteArrowDown className="h-3.5 w-3.5" aria-hidden /> Bounced
+                            </Button>
+                          </span>
+                        </PermissionGate>
+                      ) : null}
                     </span>
                   ) : (
                     p.bank_name ?? "—"
@@ -185,7 +253,7 @@ export default function PaymentsPage() {
                 <span className="flex items-center justify-end gap-2 text-sm font-semibold tabular-nums text-foreground">
                   {formatCurrency(p.amount, true)}
                   <button
-                    onClick={() => void printReceipt(p.invoice_id, p.receipt_no)}
+                    onClick={() => void printReceipt(p)}
                     className="text-muted-foreground transition-colors hover:text-primary-strong"
                     aria-label="Print receipt"
                     title="Print receipt"
@@ -199,6 +267,73 @@ export default function PaymentsPage() {
           </>
         )}
       </Card>
+
+      <Dialog
+        open={chequeTarget !== null}
+        onClose={() => setChequeTarget(null)}
+        title={chequeAction === "clear" ? "Cheque cleared" : "Cheque bounced"}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setChequeTarget(null)} disabled={chequeSaving}>
+              Cancel
+            </Button>
+            <Button variant="cta" onClick={() => void submitCheque()} disabled={chequeSaving}>
+              {chequeSaving ? "Saving…" : chequeAction === "clear" ? "Mark cleared" : "Mark bounced"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-5">
+          <p className="text-sm text-muted-foreground">
+            {chequeAction === "clear" ? (
+              <>
+                Cheque {chequeTarget?.cheque_number ?? ""} for{" "}
+                <span className="font-semibold text-foreground">{formatCurrency(chequeTarget?.amount ?? 0, true)}</span>{" "}
+                has reached the bank. The money moves into that account now.
+              </>
+            ) : (
+              <>
+                The bank returned cheque {chequeTarget?.cheque_number ?? ""} for{" "}
+                <span className="font-semibold text-foreground">{formatCurrency(chequeTarget?.amount ?? 0, true)}</span>.
+                The receipt is cancelled and the bill becomes due again.
+              </>
+            )}
+          </p>
+
+          {chequeAction === "clear" ? (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="cheque_bank">Banked into</Label>
+                <Select id="cheque_bank" value={chequeBank} onChange={(e) => setChequeBank(e.target.value)}>
+                  <option value="">Choose an account…</option>
+                  {bankAccounts.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.account_name}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="cleared_on">Cleared on</Label>
+                <Input id="cleared_on" type="date" value={clearedOn} onChange={(e) => setClearedOn(e.target.value)} />
+              </div>
+            </>
+          ) : (
+            <div className="space-y-2">
+              <Label htmlFor="bounce_reason" required>
+                What did the bank say?
+              </Label>
+              <Textarea
+                id="bounce_reason"
+                rows={3}
+                value={bounceReason}
+                onChange={(e) => setBounceReason(e.target.value)}
+                placeholder="Insufficient funds, signature mismatch…"
+              />
+            </div>
+          )}
+        </div>
+      </Dialog>
 
       <Dialog
         open={pickerOpen}

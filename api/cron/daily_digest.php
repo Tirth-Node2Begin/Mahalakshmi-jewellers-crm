@@ -118,13 +118,14 @@ try {
     // 2. low stock — one summary to everyone who can read inventory
     $low = Database::fetchAll(
         "SELECT name FROM inventory_items
-         WHERE is_active = 1 AND reorder_level > 0 AND current_stock <= reorder_level
+         WHERE is_active = 1 AND tracking = 'bulk' AND reorder_level > 0 AND current_stock <= reorder_level
          ORDER BY current_stock / reorder_level LIMIT 6"
     );
     if ($low !== []) {
         $names = array_map(static fn (array $r): string => (string) $r['name'], $low);
         $count = (int) Database::fetchValue(
-            'SELECT COUNT(*) FROM inventory_items WHERE is_active = 1 AND reorder_level > 0 AND current_stock <= reorder_level'
+            // same definition as the dashboard tile: only metal pools can run low
+            "SELECT COUNT(*) FROM inventory_items WHERE is_active = 1 AND tracking = 'bulk' AND reorder_level > 0 AND current_stock <= reorder_level"
         );
         $sent = digestNotify(
             usersWithPermission('inventory.read'),
