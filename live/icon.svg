@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Mahalakshmi Jewellers">
+  <!--
+    The browser-tab mark: the same brand square as the sidebar rail
+    (globals.css --grad-brand-from/--grad-brand-to) with its white "M".
+    The letter is a path, not <text>, so it renders identically everywhere
+    instead of depending on a font the browser may not have.
+  -->
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#567fce"/>
+      <stop offset="1" stop-color="#33528f"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#brand)"/>
+  <path fill="#ffffff" d="M14 46V18h9l9 15 9-15h9v28h-8V32l-7 10h-6l-7-10v14z"/>
+</svg>

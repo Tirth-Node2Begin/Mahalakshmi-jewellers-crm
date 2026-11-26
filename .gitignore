@@ -1,5 +1,4 @@
 .env
-live/
 node_modules/
 frontend/out/
 frontend/.next/
